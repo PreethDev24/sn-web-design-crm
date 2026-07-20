@@ -15,6 +15,7 @@ import {
   X,
   Images,
   LogOut,
+  ContactRound,
 } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
@@ -91,6 +92,7 @@ export function CrmSidebar({ isOwner, demo }: { isOwner: boolean; demo?: boolean
 
   const links = [
     ...staffLinks.filter((link) => isOwner || link.href !== "/crm/invoices"),
+    ...(isOwner ? [{ href: "/crm/contacts", label: "Contacts", icon: ContactRound }] : []),
     { href: "/crm/team", label: "Team", icon: UserPlus },
   ];
 

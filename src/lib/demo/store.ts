@@ -14,6 +14,7 @@ import type {
   Lead,
   MaintenancePlan,
   Project,
+  SalesProfile,
 } from "@/lib/types";
 
 export type DemoStore = {
@@ -29,6 +30,7 @@ export type DemoStore = {
   activities: Activity[];
   maintenance_plans: MaintenancePlan[];
   client_invite_requests: ClientInviteRequest[];
+  sales_profiles: SalesProfile[];
 };
 
 const DATA_DIR = path.join(process.cwd(), ".data");
@@ -220,6 +222,22 @@ function seedStore(): DemoStore {
     ],
     maintenance_plans: [],
     client_invite_requests: [],
+    sales_profiles: [
+      {
+        user_id: sales.id,
+        full_name: "Riley Chen",
+        email: "sales@snwebdesign.test",
+        phone: "555-0101",
+        calling_from: "Home office — Seattle, WA",
+        calling_schedule: "Mon–Fri 9am–5pm PT",
+        target_region: "West Coast",
+        daily_call_goal: 40,
+        weekly_meeting_goal: 6,
+        completed_at: ts,
+        created_at: ts,
+        updated_at: ts,
+      },
+    ],
   };
 }
 
@@ -236,6 +254,7 @@ function ensureStore(): DemoStore {
 export function readStore(): DemoStore {
   const store = ensureStore();
   if (!store.client_invite_requests) store.client_invite_requests = [];
+  if (!store.sales_profiles) store.sales_profiles = [];
   return store;
 }
 

@@ -14,6 +14,7 @@ import type {
   Invoice,
   Lead,
   Project,
+  SalesProfile,
   UserRole,
 } from "@/lib/types";
 
@@ -470,6 +471,71 @@ export async function clientInviteRequestsReady(): Promise<boolean> {
     .select("id")
     .limit(1);
   return !error || !isMissingClientInviteTable(error);
+}
+
+export function isMissingSalesProfilesTable(error: {
+  message?: string;
+  code?: string;
+}): boolean {
+  const message = error.message || "";
+  return (
+    error.code === "PGRST205" ||
+    message.includes("sales_profiles") ||
+    (message.includes("schema cache") && message.includes("sales_profiles"))
+  );
+}
+
+export async function getSalesProfile(userId: string): Promise<SalesProfile | null> {
+  if (isDemoMode()) {
+    return readStore().sales_profiles.find((p) => p.user_id === userId) ?? null;
+  }
+  if (!isSupabaseConfigured()) return null;
+  const { data, error } = await getSupabaseAdmin()
+    .from("sales_profiles")
+    .select("*")
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (error) {
+    if (isMissingSalesProfilesTable(error)) return null;
+    throw new Error(error.message);
+  }
+  return data as SalesProfile | null;
+}
+
+export async function hasCompletedSalesOnboarding(user: DbUser): Promise<boolean> {
+  if (user.role !== "sales") return true;
+  const profile = await getSalesProfile(user.id);
+  return Boolean(profile?.completed_at);
+}
+
+export async function listSalesProfiles(): Promise<SalesProfile[]> {
+  if (isDemoMode()) {
+    const store = readStore();
+    return store.sales_profiles
+      .map((p) => ({
+        ...p,
+        user: store.users.find((u) => u.id === p.user_id) ?? null,
+      }))
+      .sort((a, b) => b.completed_at.localeCompare(a.completed_at));
+  }
+  if (!isSupabaseConfigured()) return emptyResult();
+  const { data, error } = await getSupabaseAdmin()
+    .from("sales_profiles")
+    .select("*, user:users!user_id(*)")
+    .order("completed_at", { ascending: false });
+  if (error) {
+    if (isMissingSalesProfilesTable(error)) return emptyResult();
+    throw new Error(error.message);
+  }
+  return (data ?? []) as SalesProfile[];
+}
+
+export async function listContactsForOwner(): Promise<{
+  users: DbUser[];
+  salesProfiles: SalesProfile[];
+}> {
+  const [users, salesProfiles] = await Promise.all([listTeamUsers(), listSalesProfiles()]);
+  return { users, salesProfiles };
 }
 
 export async function getDashboardStats(viewer: DbUser) {

@@ -637,7 +637,9 @@ async function sendRoleInvitation(email: string, role: UserRole) {
       redirectUrl:
         role === "client"
           ? `${process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"}/portal/dashboard`
-          : `${process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"}/crm/dashboard`,
+          : role === "sales"
+            ? `${process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"}/onboarding/sales`
+            : `${process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"}/crm/dashboard`,
     });
   } catch (e) {
     throw new Error(formatClerkInviteError(e));

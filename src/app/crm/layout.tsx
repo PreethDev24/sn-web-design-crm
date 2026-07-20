@@ -1,4 +1,6 @@
+import { redirect } from "next/navigation";
 import { requireStaff } from "@/lib/auth/roles";
+import { hasCompletedSalesOnboarding } from "@/lib/db/queries";
 import { CrmSidebar } from "@/components/layout/sidebars";
 import { isDemoMode } from "@/lib/demo/mode";
 import { getDemoUsers } from "@/lib/demo/store";
@@ -8,6 +10,10 @@ import { HeaderSignOut } from "@/components/header-sign-out";
 export default async function CrmLayout({ children }: { children: React.ReactNode }) {
   const user = await requireStaff();
   const demo = isDemoMode();
+
+  if (user.role === "sales" && !(await hasCompletedSalesOnboarding(user))) {
+    redirect("/onboarding/sales");
+  }
 
   return (
     <div className="flex min-h-screen flex-col">

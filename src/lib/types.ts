@@ -204,6 +204,34 @@ export interface ClientInviteRequest {
   reviewer?: DbUser | null;
 }
 
+export interface SalesProfile {
+  user_id: string;
+  full_name: string;
+  email: string;
+  phone: string | null;
+  calling_from: string | null;
+  calling_schedule: string | null;
+  target_region: string | null;
+  daily_call_goal: number | null;
+  weekly_meeting_goal: number | null;
+  completed_at: string;
+  created_at: string;
+  updated_at: string;
+  user?: DbUser | null;
+}
+
+export const SALES_TARGET_REGIONS = [
+  "West Coast",
+  "Southwest",
+  "Midwest",
+  "Southeast",
+  "Northeast",
+  "National / Remote",
+  "Other",
+] as const;
+
+export type SalesTargetRegion = (typeof SALES_TARGET_REGIONS)[number];
+
 export const LEAD_STATUSES: LeadStatus[] = [
   "new",
   "contacted",
