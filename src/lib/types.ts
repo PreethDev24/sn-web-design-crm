@@ -20,6 +20,29 @@ export type InvoiceStatus = "draft" | "sent" | "viewed" | "paid" | "overdue" | "
 export type ActivityType = "note" | "call" | "email" | "meeting" | "status_change" | "system";
 export type ClientInviteRequestStatus = "pending" | "approved" | "rejected";
 
+export interface Conversation {
+  id: string;
+  participant_one_id: string;
+  participant_two_id: string;
+  last_message_at: string;
+  created_at: string;
+  updated_at: string;
+  /** The other person in this thread relative to the current viewer */
+  partner?: DbUser | null;
+  last_message?: Message | null;
+  unread_count?: number;
+}
+
+export interface Message {
+  id: string;
+  conversation_id: string;
+  sender_id: string;
+  body: string;
+  created_at: string;
+  read_at: string | null;
+  sender?: DbUser | null;
+}
+
 export interface DbUser {
   id: string;
   clerk_id: string;

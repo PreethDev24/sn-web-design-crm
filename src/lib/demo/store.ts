@@ -6,6 +6,7 @@ import type {
   Client,
   ClientInviteRequest,
   Contract,
+  Conversation,
   DbUser,
   Deal,
   Deliverable,
@@ -13,6 +14,7 @@ import type {
   Invoice,
   Lead,
   MaintenancePlan,
+  Message,
   Project,
   SalesProfile,
 } from "@/lib/types";
@@ -31,6 +33,8 @@ export type DemoStore = {
   maintenance_plans: MaintenancePlan[];
   client_invite_requests: ClientInviteRequest[];
   sales_profiles: SalesProfile[];
+  conversations: Conversation[];
+  messages: Message[];
 };
 
 const DATA_DIR = path.join(process.cwd(), ".data");
@@ -238,6 +242,8 @@ function seedStore(): DemoStore {
         updated_at: ts,
       },
     ],
+    conversations: [],
+    messages: [],
   };
 }
 
@@ -255,6 +261,8 @@ export function readStore(): DemoStore {
   const store = ensureStore();
   if (!store.client_invite_requests) store.client_invite_requests = [];
   if (!store.sales_profiles) store.sales_profiles = [];
+  if (!store.conversations) store.conversations = [];
+  if (!store.messages) store.messages = [];
   return store;
 }
 

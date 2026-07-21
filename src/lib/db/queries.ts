@@ -7,16 +7,23 @@ import type {
   Client,
   ClientInviteRequest,
   Contract,
+  Conversation,
   DbUser,
   Deal,
   Deliverable,
   Feedback,
   Invoice,
   Lead,
+  Message,
   Project,
   SalesProfile,
   UserRole,
 } from "@/lib/types";
+import {
+  canChatRoles,
+  chatPartnerRolesFor,
+  orderedParticipantIds,
+} from "@/lib/chat/permissions";
 
 function emptyResult<T>(): T[] {
   return [];
@@ -565,3 +572,224 @@ export async function getDashboardStats(viewer: DbUser) {
     openInvoiceAmount: openInvoicesList.reduce((s, i) => s + Number(i.amount || 0), 0),
   };
 }
+
+export function isMissingChatTables(error: {
+  message?: string;
+  code?: string;
+}): boolean {
+  const message = error.message || "";
+  return (
+    error.code === "PGRST205" ||
+    message.includes("conversations") ||
+    message.includes("messages") ||
+    (message.includes("schema cache") &&
+      (message.includes("conversations") || message.includes("messages")))
+  );
+}
+
+export async function chatTablesReady(): Promise<boolean> {
+  if (isDemoMode()) return true;
+  if (!isSupabaseConfigured()) return false;
+  const { error } = await getSupabaseAdmin().from("conversations").select("id").limit(1);
+  return !error || !isMissingChatTables(error);
+}
+
+export async function listChatPartners(viewer: DbUser): Promise<DbUser[]> {
+  const roles = chatPartnerRolesFor(viewer.role);
+  if (!roles.length) return [];
+
+  if (isDemoMode()) {
+    return readStore()
+      .users.filter((u) => u.id !== viewer.id && roles.includes(u.role))
+      .sort((a, b) => fullNameSort(a).localeCompare(fullNameSort(b)));
+  }
+  if (!isSupabaseConfigured()) return emptyResult();
+  const { data, error } = await getSupabaseAdmin()
+    .from("users")
+    .select("*")
+    .in("role", roles)
+    .neq("id", viewer.id)
+    .order("first_name", { ascending: true });
+  if (error) throw new Error(error.message);
+  return (data ?? []) as DbUser[];
+}
+
+function fullNameSort(u: DbUser) {
+  return [u.first_name, u.last_name, u.email].filter(Boolean).join(" ").toLowerCase();
+}
+
+function enrichConversation(
+  row: Conversation,
+  viewer: DbUser,
+  users: DbUser[],
+  messages: Message[]
+): Conversation {
+  const partnerId =
+    row.participant_one_id === viewer.id ? row.participant_two_id : row.participant_one_id;
+  const thread = messages
+    .filter((m) => m.conversation_id === row.id)
+    .sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const last = thread[thread.length - 1] ?? null;
+  const unread = thread.filter(
+    (m) => m.sender_id !== viewer.id && !m.read_at
+  ).length;
+  return {
+    ...row,
+    partner: users.find((u) => u.id === partnerId) ?? null,
+    last_message: last,
+    unread_count: unread,
+  };
+}
+
+export async function listConversations(viewer: DbUser): Promise<Conversation[]> {
+  if (isDemoMode()) {
+    const store = readStore();
+    return store.conversations
+      .filter(
+        (c) =>
+          c.participant_one_id === viewer.id || c.participant_two_id === viewer.id
+      )
+      .map((c) => enrichConversation(c, viewer, store.users, store.messages))
+      .sort((a, b) => b.last_message_at.localeCompare(a.last_message_at));
+  }
+  if (!isSupabaseConfigured()) return emptyResult();
+
+  const supabase = getSupabaseAdmin();
+  const { data, error } = await supabase
+    .from("conversations")
+    .select("*")
+    .or(`participant_one_id.eq.${viewer.id},participant_two_id.eq.${viewer.id}`)
+    .order("last_message_at", { ascending: false });
+
+  if (error) {
+    if (isMissingChatTables(error)) return emptyResult();
+    throw new Error(error.message);
+  }
+
+  const rows = (data ?? []) as Conversation[];
+  if (!rows.length) return [];
+
+  const partnerIds = [
+    ...new Set(
+      rows.map((c) =>
+        c.participant_one_id === viewer.id ? c.participant_two_id : c.participant_one_id
+      )
+    ),
+  ];
+  const conversationIds = rows.map((c) => c.id);
+
+  const [{ data: partners }, { data: recentMsgs }, { data: unreadRows }] =
+    await Promise.all([
+      supabase.from("users").select("*").in("id", partnerIds),
+      supabase
+        .from("messages")
+        .select("*")
+        .in("conversation_id", conversationIds)
+        .order("created_at", { ascending: false }),
+      supabase
+        .from("messages")
+        .select("conversation_id")
+        .in("conversation_id", conversationIds)
+        .neq("sender_id", viewer.id)
+        .is("read_at", null),
+    ]);
+
+  const users = (partners ?? []) as DbUser[];
+  const allMessages = (recentMsgs ?? []) as Message[];
+  const lastByConv = new Map<string, Message>();
+  for (const msg of allMessages) {
+    if (!lastByConv.has(msg.conversation_id)) {
+      lastByConv.set(msg.conversation_id, msg);
+    }
+  }
+  const unreadCount = new Map<string, number>();
+  for (const row of unreadRows ?? []) {
+    const id = (row as { conversation_id: string }).conversation_id;
+    unreadCount.set(id, (unreadCount.get(id) ?? 0) + 1);
+  }
+
+  return rows.map((c) => {
+    const partnerId =
+      c.participant_one_id === viewer.id ? c.participant_two_id : c.participant_one_id;
+    return {
+      ...c,
+      partner: users.find((u) => u.id === partnerId) ?? null,
+      last_message: lastByConv.get(c.id) ?? null,
+      unread_count: unreadCount.get(c.id) ?? 0,
+    };
+  });
+}
+
+export async function getConversationForViewer(
+  conversationId: string,
+  viewer: DbUser
+): Promise<Conversation | null> {
+  if (isDemoMode()) {
+    const store = readStore();
+    const row = store.conversations.find((c) => c.id === conversationId);
+    if (!row) return null;
+    if (row.participant_one_id !== viewer.id && row.participant_two_id !== viewer.id) {
+      return null;
+    }
+    return enrichConversation(row, viewer, store.users, store.messages);
+  }
+  if (!isSupabaseConfigured()) return null;
+
+  const { data, error } = await getSupabaseAdmin()
+    .from("conversations")
+    .select("*")
+    .eq("id", conversationId)
+    .maybeSingle();
+  if (error) {
+    if (isMissingChatTables(error)) return null;
+    throw new Error(error.message);
+  }
+  if (!data) return null;
+  const row = data as Conversation;
+  if (row.participant_one_id !== viewer.id && row.participant_two_id !== viewer.id) {
+    return null;
+  }
+
+  const partnerId =
+    row.participant_one_id === viewer.id ? row.participant_two_id : row.participant_one_id;
+  const { data: partner } = await getSupabaseAdmin()
+    .from("users")
+    .select("*")
+    .eq("id", partnerId)
+    .maybeSingle();
+
+  return { ...row, partner: (partner as DbUser) ?? null };
+}
+
+export async function listMessages(
+  conversationId: string,
+  viewer: DbUser
+): Promise<Message[]> {
+  const conversation = await getConversationForViewer(conversationId, viewer);
+  if (!conversation) return [];
+
+  if (isDemoMode()) {
+    const store = readStore();
+    return store.messages
+      .filter((m) => m.conversation_id === conversationId)
+      .sort((a, b) => a.created_at.localeCompare(b.created_at))
+      .map((m) => ({
+        ...m,
+        sender: store.users.find((u) => u.id === m.sender_id) ?? null,
+      }));
+  }
+  if (!isSupabaseConfigured()) return emptyResult();
+
+  const { data, error } = await getSupabaseAdmin()
+    .from("messages")
+    .select("*, sender:users!sender_id(*)")
+    .eq("conversation_id", conversationId)
+    .order("created_at", { ascending: true });
+  if (error) {
+    if (isMissingChatTables(error)) return emptyResult();
+    throw new Error(error.message);
+  }
+  return (data ?? []) as Message[];
+}
+
+export { canChatRoles, orderedParticipantIds };

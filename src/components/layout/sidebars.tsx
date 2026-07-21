@@ -16,6 +16,7 @@ import {
   Images,
   LogOut,
   ContactRound,
+  MessageSquare,
 } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
@@ -26,6 +27,7 @@ const staffLinks = [
   { href: "/crm/leads", label: "Leads", icon: Users },
   { href: "/crm/clients", label: "Clients", icon: Building2 },
   { href: "/crm/projects", label: "Projects", icon: FolderKanban },
+  { href: "/crm/messages", label: "Messages", icon: MessageSquare },
   { href: "/crm/contracts", label: "Contracts", icon: FileText },
   { href: "/crm/invoices", label: "Invoices", icon: Receipt },
 ];
@@ -160,6 +162,7 @@ const portalLinks = [
   { href: "/portal/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/portal/projects", label: "Projects", icon: FolderKanban },
   { href: "/portal/deliverables", label: "Deliverables", icon: Images },
+  { href: "/portal/messages", label: "Messages", icon: MessageSquare },
   { href: "/portal/contracts", label: "Contracts", icon: FileText },
   { href: "/portal/invoices", label: "Invoices", icon: Receipt },
 ];
