@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { headers } from "next/headers";
 import Stripe from "stripe";
-import { requireClient, requireInvoiceAccess, requireStaff } from "@/lib/auth/roles";
+import { requireClient, requireInvoiceAccess, requireContractAccess, requireStaff } from "@/lib/auth/roles";
 import { getSupabaseAdmin, isSupabaseConfigured } from "@/lib/db/supabase";
 import { isDemoMode, isStripeConfigured } from "@/lib/demo/mode";
 import { mutateStore, newId, touch } from "@/lib/demo/store";
@@ -35,7 +35,7 @@ async function saveDemoFile(file: File, folder: string) {
 }
 
 export async function createContract(formData: FormData) {
-  const user = await requireStaff();
+  const user = await requireContractAccess();
   const file = formData.get("file") as File | null;
   let fileUrl: string | null = null;
   let fileName: string | null = null;
@@ -105,7 +105,7 @@ export async function createContract(formData: FormData) {
 }
 
 export async function sendContract(contractId: string) {
-  await requireStaff();
+  await requireContractAccess();
 
   if (isDemoMode()) {
     mutateStore((store) => {

@@ -9,10 +9,10 @@ import {
   requireDemoOwner,
   requireDemoStaff,
 } from "@/lib/demo/auth";
-import { canAccessInvoices, isStaffRole } from "@/lib/auth/roles-shared";
+import { canAccessInvoices, canAccessContracts, isStaffRole } from "@/lib/auth/roles-shared";
 import type { DbUser, UserRole } from "@/lib/types";
 
-export { canAccessInvoices, isStaffRole };
+export { canAccessInvoices, canAccessContracts, isStaffRole };
 
 function formatSupabaseError(error: {
   message?: string;
@@ -204,6 +204,13 @@ export async function requireInvoiceAccess() {
   if (isDemoMode()) return requireDemoOwner();
   const user = await requireStaff();
   if (!canAccessInvoices(user.role)) redirect("/crm/dashboard");
+  return user;
+}
+
+export async function requireContractAccess() {
+  if (isDemoMode()) return requireDemoOwner();
+  const user = await requireStaff();
+  if (!canAccessContracts(user.role)) redirect("/crm/dashboard");
   return user;
 }
 

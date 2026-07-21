@@ -30,6 +30,8 @@ const staffLinks = [
   { href: "/crm/invoices", label: "Invoices", icon: Receipt },
 ];
 
+const salesHiddenHrefs = new Set(["/crm/invoices", "/crm/contracts"]);
+
 function SignOutControl({ dark }: { dark?: boolean }) {
   return (
     <SignOutButton redirectUrl="/">
@@ -91,7 +93,7 @@ export function CrmSidebar({ isOwner, demo }: { isOwner: boolean; demo?: boolean
   const [open, setOpen] = useState(false);
 
   const links = [
-    ...staffLinks.filter((link) => isOwner || link.href !== "/crm/invoices"),
+    ...staffLinks.filter((link) => isOwner || !salesHiddenHrefs.has(link.href)),
     ...(isOwner ? [{ href: "/crm/contacts", label: "Contacts", icon: ContactRound }] : []),
     { href: "/crm/team", label: "Team", icon: UserPlus },
   ];

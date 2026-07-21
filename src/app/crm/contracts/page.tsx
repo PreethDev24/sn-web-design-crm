@@ -1,4 +1,4 @@
-import { requireStaff } from "@/lib/auth/roles";
+import { requireContractAccess } from "@/lib/auth/roles";
 import { listClients, listContracts, listProjects } from "@/lib/db/queries";
 import { formatDate } from "@/lib/utils";
 import { CreateContractDialog } from "@/components/crm/create-contract-dialog";
@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 
 export default async function ContractsPage() {
-  const user = await requireStaff();
+  const user = await requireContractAccess();
   const [contracts, clients, projects] = await Promise.all([
     listContracts(user),
     listClients(user),

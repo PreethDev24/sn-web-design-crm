@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { requireClient, requireStaff } from "@/lib/auth/roles";
+import { canManageDeliverables, canManageProjects } from "@/lib/auth/roles-shared";
 import { getSupabaseAdmin, isSupabaseConfigured } from "@/lib/db/supabase";
 import { isDemoMode } from "@/lib/demo/mode";
 import { mutateStore, newId, touch } from "@/lib/demo/store";
@@ -31,6 +32,9 @@ async function saveDemoFile(file: File, folder: string) {
 
 export async function createProject(formData: FormData) {
   const user = await requireStaff();
+  if (!canManageProjects(user.role)) {
+    throw new Error("Only owners can create projects");
+  }
 
   if (isDemoMode()) {
     const clientId = String(formData.get("client_id") || "");
@@ -82,7 +86,10 @@ export async function createProject(formData: FormData) {
 }
 
 export async function updateProjectStatus(projectId: string, status: ProjectStatus) {
-  await requireStaff();
+  const user = await requireStaff();
+  if (!canManageProjects(user.role)) {
+    throw new Error("Only owners can update project status");
+  }
   const progressMap: Partial<Record<ProjectStatus, number>> = {
     discovery: 10,
     wireframing: 25,
@@ -120,6 +127,9 @@ export async function updateProjectStatus(projectId: string, status: ProjectStat
 
 export async function createDeliverable(formData: FormData) {
   const user = await requireStaff();
+  if (!canManageDeliverables(user.role)) {
+    throw new Error("Only owners can upload deliverables");
+  }
   const projectId = String(formData.get("project_id") || "");
   const file = formData.get("file") as File | null;
 
