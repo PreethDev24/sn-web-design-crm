@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { RemoveMemberButton } from "@/components/crm/remove-member-button";
 import { cn } from "@/lib/utils";
 
 const ROLE_FILTERS: Array<{ id: "all" | UserRole; label: string }> = [
@@ -19,9 +20,11 @@ const ROLE_FILTERS: Array<{ id: "all" | UserRole; label: string }> = [
 export function ContactsDirectory({
   users,
   salesProfiles,
+  currentUserId,
 }: {
   users: DbUser[];
   salesProfiles: SalesProfile[];
+  currentUserId: string;
 }) {
   const [role, setRole] = useState<"all" | UserRole>("all");
   const [query, setQuery] = useState("");
@@ -100,7 +103,7 @@ export function ContactsDirectory({
                     {profile?.email || user.email}
                   </p>
                 </div>
-                <div className="flex flex-wrap gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <Badge variant="secondary" className="capitalize">
                     {user.role}
                   </Badge>
@@ -109,6 +112,7 @@ export function ContactsDirectory({
                       {profile ? "Onboarded" : "Pending onboarding"}
                     </Badge>
                   )}
+                  <RemoveMemberButton member={user} currentUserId={currentUserId} />
                 </div>
               </CardHeader>
               <CardContent className="space-y-3 text-sm">

@@ -10,6 +10,7 @@ import { fullName } from "@/lib/utils";
 import { InviteTeamForm } from "@/components/crm/invite-team-form";
 import { RequestClientInviteForm } from "@/components/crm/request-client-invite-form";
 import { ClientInviteRequestsList } from "@/components/crm/client-invite-requests-list";
+import { RemoveMemberButton } from "@/components/crm/remove-member-button";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -128,7 +129,7 @@ export default async function TeamPage() {
                       </p>
                       <p className="text-xs text-slate-500">{u.email}</p>
                     </div>
-                    <div className="flex flex-wrap gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <Badge variant="secondary" className="capitalize">
                         {u.role}
                       </Badge>
@@ -137,6 +138,7 @@ export default async function TeamPage() {
                           {profile ? "Onboarded" : "Pending"}
                         </Badge>
                       )}
+                      <RemoveMemberButton member={u} currentUserId={user.id} />
                     </div>
                   </div>
                   {u.role === "sales" && profile && (

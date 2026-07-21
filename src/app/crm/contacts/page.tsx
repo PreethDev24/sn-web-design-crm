@@ -3,7 +3,7 @@ import { listContactsForOwner } from "@/lib/db/queries";
 import { ContactsDirectory } from "@/components/crm/contacts-directory";
 
 export default async function ContactsPage() {
-  await requireOwner();
+  const owner = await requireOwner();
   const { users, salesProfiles } = await listContactsForOwner();
 
   return (
@@ -14,7 +14,11 @@ export default async function ContactsPage() {
           All people in the CRM — filter by role and review sales onboarding details
         </p>
       </div>
-      <ContactsDirectory users={users} salesProfiles={salesProfiles} />
+      <ContactsDirectory
+        users={users}
+        salesProfiles={salesProfiles}
+        currentUserId={owner.id}
+      />
     </div>
   );
 }
