@@ -67,6 +67,7 @@ export interface DbUser {
   phone: string | null;
   company_name: string | null;
   avatar_url: string | null;
+  last_seen_at?: string | null;
   created_at: string;
   updated_at: string;
 }

@@ -9,6 +9,10 @@ import {
   isMissingChatTables,
   orderedParticipantIds,
 } from "@/lib/db/queries";
+import {
+  notifyChatMessageIfOffline,
+  notifyChatPing,
+} from "@/lib/email/chat-notifications";
 import { getSupabaseAdmin, isSupabaseConfigured } from "@/lib/db/supabase";
 import { isDemoMode } from "@/lib/demo/mode";
 import { mutateStore, newId, readStore, touch } from "@/lib/demo/store";
@@ -48,6 +52,26 @@ async function loadUserById(id: string): Promise<DbUser | null> {
   return (data as DbUser) ?? null;
 }
 
+async function touchUserLastSeen(userId: string) {
+  const ts = touch();
+  if (isDemoMode()) {
+    mutateStore((store) => {
+      const user = store.users.find((u) => u.id === userId);
+      if (user) user.last_seen_at = ts;
+    });
+    return;
+  }
+  if (!isSupabaseConfigured() || userId === "local-dev-user") return;
+  const { error } = await requireDb()
+    .from("users")
+    .update({ last_seen_at: ts })
+    .eq("id", userId);
+  // Column may be missing until migration 008 is applied
+  if (error && !error.message.includes("last_seen_at")) {
+    console.warn("Failed to update last_seen_at:", error.message);
+  }
+}
+
 async function assertCanMessage(viewer: DbUser, partnerId: string) {
   const partner = await loadUserById(partnerId);
   if (!partner) throw new Error("User not found");
@@ -76,6 +100,35 @@ async function clearTypingForViewer(conversationId: string, viewerId: string) {
     .update({ typing_user_id: null, typing_until: null })
     .eq("id", conversationId)
     .eq("typing_user_id", viewerId);
+}
+
+async function notifyRecipient(params: {
+  kind: "message" | "ping";
+  conversationId: string;
+  sender: DbUser;
+  recipientId: string;
+  preview: string;
+}) {
+  try {
+    const recipient = await loadUserById(params.recipientId);
+    if (!recipient) return;
+    if (params.kind === "ping") {
+      await notifyChatPing({
+        recipient,
+        sender: params.sender,
+        conversationId: params.conversationId,
+      });
+      return;
+    }
+    await notifyChatMessageIfOffline({
+      recipient,
+      sender: params.sender,
+      conversationId: params.conversationId,
+      preview: params.preview,
+    });
+  } catch (error) {
+    console.error("Chat email notification failed:", error);
+  }
 }
 
 export async function startConversation(partnerId: string) {
@@ -191,6 +244,13 @@ export async function sendMessage(conversationId: string, body: string) {
       }
     });
     revalidateChatPaths();
+    await notifyRecipient({
+      kind: "message",
+      conversationId,
+      sender: viewer,
+      recipientId: partnerId,
+      preview: text,
+    });
     return;
   }
 
@@ -230,6 +290,13 @@ export async function sendMessage(conversationId: string, body: string) {
     .eq("id", conversationId);
 
   revalidateChatPaths();
+  await notifyRecipient({
+    kind: "message",
+    conversationId,
+    sender: viewer,
+    recipientId: partnerId,
+    preview: text,
+  });
 }
 
 export async function sendPing(conversationId: string) {
@@ -278,6 +345,13 @@ export async function sendPing(conversationId: string) {
     });
     if (blocked) throw new Error("Wait a few seconds before pinging again");
     revalidateChatPaths();
+    await notifyRecipient({
+      kind: "ping",
+      conversationId,
+      sender: viewer,
+      recipientId: partnerId,
+      preview: PING_BODY,
+    });
     return;
   }
 
@@ -332,6 +406,13 @@ export async function sendPing(conversationId: string) {
     .eq("id", conversationId);
 
   revalidateChatPaths();
+  await notifyRecipient({
+    kind: "ping",
+    conversationId,
+    sender: viewer,
+    recipientId: partnerId,
+    preview: PING_BODY,
+  });
 }
 
 /** Lightweight presence update — does not revalidate pages. */
@@ -339,6 +420,7 @@ export async function setTypingPresence(conversationId: string, isTyping: boolea
   const viewer = await requireAuth();
   const conversation = await getConversationForViewer(conversationId, viewer);
   if (!conversation) return { ok: false as const };
+  await touchUserLastSeen(viewer.id);
 
   if (isDemoMode()) {
     mutateStore((store) => {
@@ -376,6 +458,7 @@ export async function setTypingPresence(conversationId: string, isTyping: boolea
 
 export async function fetchTypingPresence(conversationId: string) {
   const viewer = await requireAuth();
+  await touchUserLastSeen(viewer.id);
   return getConversationTyping(conversationId, viewer);
 }
 
@@ -383,6 +466,7 @@ export async function markConversationRead(conversationId: string) {
   const viewer = await requireAuth();
   const conversation = await getConversationForViewer(conversationId, viewer);
   if (!conversation) return;
+  await touchUserLastSeen(viewer.id);
 
   const ts = touch();
 
