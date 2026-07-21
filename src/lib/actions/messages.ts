@@ -5,6 +5,7 @@ import {
   canChatRoles,
   chatTablesReady,
   getConversationForViewer,
+  getConversationTyping,
   isMissingChatTables,
   orderedParticipantIds,
 } from "@/lib/db/queries";
@@ -13,6 +14,10 @@ import { isDemoMode } from "@/lib/demo/mode";
 import { mutateStore, newId, readStore, touch } from "@/lib/demo/store";
 import type { Conversation, DbUser, Message } from "@/lib/types";
 import { revalidatePath } from "next/cache";
+
+const TYPING_TTL_MS = 4000;
+const PING_COOLDOWN_MS = 30_000;
+const PING_BODY = "🔔 Ping";
 
 function requireDb() {
   if (!isSupabaseConfigured()) {
@@ -24,6 +29,10 @@ function requireDb() {
 function revalidateChatPaths() {
   revalidatePath("/crm/messages");
   revalidatePath("/portal/messages");
+}
+
+function typingUntilIso() {
+  return new Date(Date.now() + TYPING_TTL_MS).toISOString();
 }
 
 async function loadUserById(id: string): Promise<DbUser | null> {
@@ -48,6 +57,25 @@ async function assertCanMessage(viewer: DbUser, partnerId: string) {
   return partner;
 }
 
+async function clearTypingForViewer(conversationId: string, viewerId: string) {
+  if (isDemoMode()) {
+    mutateStore((store) => {
+      const conv = store.conversations.find((c) => c.id === conversationId);
+      if (conv && conv.typing_user_id === viewerId) {
+        conv.typing_user_id = null;
+        conv.typing_until = null;
+      }
+    });
+    return;
+  }
+  if (!isSupabaseConfigured()) return;
+  await requireDb()
+    .from("conversations")
+    .update({ typing_user_id: null, typing_until: null })
+    .eq("id", conversationId)
+    .eq("typing_user_id", viewerId);
+}
+
 export async function startConversation(partnerId: string) {
   const viewer = await requireAuth();
   if (partnerId === viewer.id) throw new Error("Cannot message yourself");
@@ -69,6 +97,8 @@ export async function startConversation(partnerId: string) {
         last_message_at: ts,
         created_at: ts,
         updated_at: ts,
+        typing_user_id: null,
+        typing_until: null,
       };
       store.conversations.push(conversation);
       return conversation.id;
@@ -134,6 +164,7 @@ export async function sendMessage(conversationId: string, body: string) {
   await assertCanMessage(viewer, partnerId);
 
   const ts = touch();
+  await clearTypingForViewer(conversationId, viewer.id);
 
   if (isDemoMode()) {
     mutateStore((store) => {
@@ -142,6 +173,7 @@ export async function sendMessage(conversationId: string, body: string) {
         conversation_id: conversationId,
         sender_id: viewer.id,
         body: text,
+        kind: "text",
         created_at: ts,
         read_at: null,
       };
@@ -150,6 +182,10 @@ export async function sendMessage(conversationId: string, body: string) {
       if (conv) {
         conv.last_message_at = ts;
         conv.updated_at = ts;
+        if (conv.typing_user_id === viewer.id) {
+          conv.typing_user_id = null;
+          conv.typing_until = null;
+        }
       }
     });
     revalidateChatPaths();
@@ -161,6 +197,7 @@ export async function sendMessage(conversationId: string, body: string) {
     conversation_id: conversationId,
     sender_id: viewer.id,
     body: text,
+    kind: "text",
   });
   if (error) {
     if (isMissingChatTables(error)) {
@@ -168,15 +205,176 @@ export async function sendMessage(conversationId: string, body: string) {
         "Chat tables missing — run supabase/migrations/006_chat.sql in Supabase"
       );
     }
-    throw new Error(error.message);
+    if (error.message.includes("kind")) {
+      const retry = await supabase.from("messages").insert({
+        conversation_id: conversationId,
+        sender_id: viewer.id,
+        body: text,
+      });
+      if (retry.error) throw new Error(retry.error.message);
+    } else {
+      throw new Error(error.message);
+    }
   }
 
   await supabase
     .from("conversations")
-    .update({ last_message_at: ts, updated_at: ts })
+    .update({
+      last_message_at: ts,
+      updated_at: ts,
+      typing_user_id: null,
+      typing_until: null,
+    })
     .eq("id", conversationId);
 
   revalidateChatPaths();
+}
+
+export async function sendPing(conversationId: string) {
+  const viewer = await requireAuth();
+  const conversation = await getConversationForViewer(conversationId, viewer);
+  if (!conversation) throw new Error("Conversation not found");
+
+  const partnerId =
+    conversation.participant_one_id === viewer.id
+      ? conversation.participant_two_id
+      : conversation.participant_one_id;
+  await assertCanMessage(viewer, partnerId);
+
+  const ts = touch();
+  const cutoff = new Date(Date.now() - PING_COOLDOWN_MS).toISOString();
+
+  if (isDemoMode()) {
+    const blocked = mutateStore((store) => {
+      const recent = store.messages.find(
+        (m) =>
+          m.conversation_id === conversationId &&
+          m.sender_id === viewer.id &&
+          (m.kind === "ping" || m.body === PING_BODY) &&
+          m.created_at >= cutoff
+      );
+      if (recent) return true;
+      store.messages.push({
+        id: newId("msg"),
+        conversation_id: conversationId,
+        sender_id: viewer.id,
+        body: PING_BODY,
+        kind: "ping",
+        created_at: ts,
+        read_at: null,
+      });
+      const conv = store.conversations.find((c) => c.id === conversationId);
+      if (conv) {
+        conv.last_message_at = ts;
+        conv.updated_at = ts;
+        if (conv.typing_user_id === viewer.id) {
+          conv.typing_user_id = null;
+          conv.typing_until = null;
+        }
+      }
+      return false;
+    });
+    if (blocked) throw new Error("Wait a few seconds before pinging again");
+    revalidateChatPaths();
+    return;
+  }
+
+  const supabase = requireDb();
+  const { data: recentPings, error: recentError } = await supabase
+    .from("messages")
+    .select("id, kind, body, created_at")
+    .eq("conversation_id", conversationId)
+    .eq("sender_id", viewer.id)
+    .gte("created_at", cutoff)
+    .order("created_at", { ascending: false })
+    .limit(10);
+  if (recentError && !isMissingChatTables(recentError)) {
+    throw new Error(recentError.message);
+  }
+  const tooSoon = (recentPings ?? []).some(
+    (m) => m.kind === "ping" || m.body === PING_BODY
+  );
+  if (tooSoon) throw new Error("Wait a few seconds before pinging again");
+
+  const { error } = await supabase.from("messages").insert({
+    conversation_id: conversationId,
+    sender_id: viewer.id,
+    body: PING_BODY,
+    kind: "ping",
+  });
+  if (error) {
+    if (error.message.includes("kind")) {
+      const retry = await supabase.from("messages").insert({
+        conversation_id: conversationId,
+        sender_id: viewer.id,
+        body: PING_BODY,
+      });
+      if (retry.error) throw new Error(retry.error.message);
+    } else if (isMissingChatTables(error)) {
+      throw new Error(
+        "Chat tables missing — run supabase/migrations/006_chat.sql in Supabase"
+      );
+    } else {
+      throw new Error(error.message);
+    }
+  }
+
+  await supabase
+    .from("conversations")
+    .update({
+      last_message_at: ts,
+      updated_at: ts,
+      typing_user_id: null,
+      typing_until: null,
+    })
+    .eq("id", conversationId);
+
+  revalidateChatPaths();
+}
+
+/** Lightweight presence update — does not revalidate pages. */
+export async function setTypingPresence(conversationId: string, isTyping: boolean) {
+  const viewer = await requireAuth();
+  const conversation = await getConversationForViewer(conversationId, viewer);
+  if (!conversation) return { ok: false as const };
+
+  if (isDemoMode()) {
+    mutateStore((store) => {
+      const conv = store.conversations.find((c) => c.id === conversationId);
+      if (!conv) return;
+      if (isTyping) {
+        conv.typing_user_id = viewer.id;
+        conv.typing_until = typingUntilIso();
+      } else if (conv.typing_user_id === viewer.id) {
+        conv.typing_user_id = null;
+        conv.typing_until = null;
+      }
+    });
+    return { ok: true as const };
+  }
+
+  const supabase = requireDb();
+  if (isTyping) {
+    const { error } = await supabase
+      .from("conversations")
+      .update({
+        typing_user_id: viewer.id,
+        typing_until: typingUntilIso(),
+      })
+      .eq("id", conversationId);
+    if (error && !error.message.includes("typing_")) {
+      if (isMissingChatTables(error)) return { ok: false as const };
+      throw new Error(error.message);
+    }
+  } else {
+    await clearTypingForViewer(conversationId, viewer.id);
+  }
+  return { ok: true as const };
+}
+
+export async function fetchTypingPresence(conversationId: string) {
+  const viewer = await requireAuth();
+  return getConversationTyping(conversationId, viewer);
 }
 
 export async function markConversationRead(conversationId: string) {

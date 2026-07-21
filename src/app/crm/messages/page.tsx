@@ -31,7 +31,9 @@ export default async function CrmMessagesPage({
           <p className="font-medium">One-time database setup required</p>
           <p className="mt-1">
             Run{" "}
-            <code className="rounded bg-amber-100 px-1">supabase/migrations/006_chat.sql</code>{" "}
+            <code className="rounded bg-amber-100 px-1">supabase/migrations/006_chat.sql</code>
+            {" "}and{" "}
+            <code className="rounded bg-amber-100 px-1">007_chat_typing_ping.sql</code>{" "}
             in the Supabase SQL Editor, then refresh this page.
           </p>
         </div>
@@ -45,8 +47,8 @@ export default async function CrmMessagesPage({
         basePath="/crm/messages"
         subtitle={
           user.role === "owner"
-            ? "Message clients and sales reps"
-            : "Message owners for support and deal questions"
+            ? "Message clients and sales reps — use New chat to pick who you're writing to"
+            : "Message owners — use New chat to pick who you're writing to"
         }
       />
     </div>

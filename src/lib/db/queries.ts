@@ -4,6 +4,7 @@ import { readStore } from "@/lib/demo/store";
 import { canAccessInvoices } from "@/lib/auth/roles-shared";
 import type {
   Activity,
+  ChatPartnerOption,
   Client,
   ClientInviteRequest,
   Contract,
@@ -594,28 +595,114 @@ export async function chatTablesReady(): Promise<boolean> {
   return !error || !isMissingChatTables(error);
 }
 
-export async function listChatPartners(viewer: DbUser): Promise<DbUser[]> {
+export async function listChatPartners(viewer: DbUser): Promise<ChatPartnerOption[]> {
   const roles = chatPartnerRolesFor(viewer.role);
   if (!roles.length) return [];
 
+  let users: DbUser[] = [];
+  let clients: Client[] = [];
+  let projects: Project[] = [];
+
   if (isDemoMode()) {
-    return readStore()
-      .users.filter((u) => u.id !== viewer.id && roles.includes(u.role))
-      .sort((a, b) => fullNameSort(a).localeCompare(fullNameSort(b)));
+    const store = readStore();
+    users = store.users.filter((u) => u.id !== viewer.id && roles.includes(u.role));
+    clients = store.clients;
+    projects = store.projects;
+  } else if (!isSupabaseConfigured()) {
+    return emptyResult();
+  } else {
+    const supabase = getSupabaseAdmin();
+    const [usersRes, clientsRes, projectsRes] = await Promise.all([
+      supabase
+        .from("users")
+        .select("*")
+        .in("role", roles)
+        .neq("id", viewer.id)
+        .order("first_name", { ascending: true }),
+      supabase.from("clients").select("*"),
+      supabase.from("projects").select("*"),
+    ]);
+    if (usersRes.error) throw new Error(usersRes.error.message);
+    if (clientsRes.error) throw new Error(clientsRes.error.message);
+    if (projectsRes.error) throw new Error(projectsRes.error.message);
+    users = (usersRes.data ?? []) as DbUser[];
+    clients = (clientsRes.data ?? []) as Client[];
+    projects = (projectsRes.data ?? []) as Project[];
   }
-  if (!isSupabaseConfigured()) return emptyResult();
-  const { data, error } = await getSupabaseAdmin()
-    .from("users")
-    .select("*")
-    .in("role", roles)
-    .neq("id", viewer.id)
-    .order("first_name", { ascending: true });
-  if (error) throw new Error(error.message);
-  return (data ?? []) as DbUser[];
+
+  return users
+    .map((user) => withChatPartnerContext(user, clients, projects))
+    .sort((a, b) => fullNameSort(a).localeCompare(fullNameSort(b)));
+}
+
+function pickPrimaryProject(projects: Project[]): Project | null {
+  const open = projects.filter((p) => !["completed", "terminated"].includes(p.status));
+  const pool = open.length ? open : projects;
+  return (
+    [...pool].sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0] ?? null
+  );
+}
+
+function withChatPartnerContext(
+  user: DbUser,
+  clients: Client[],
+  projects: Project[]
+): ChatPartnerOption {
+  if (user.role === "client") {
+    const client =
+      clients.find((c) => c.primary_user_id === user.id) ??
+      clients.find(
+        (c) => c.email && user.email && c.email.toLowerCase() === user.email.toLowerCase()
+      ) ??
+      null;
+    const clientProjects = client
+      ? projects.filter((p) => p.client_id === client.id)
+      : [];
+    const primary = pickPrimaryProject(clientProjects);
+    const context_label = primary
+      ? `${primary.id} · ${primary.name}`
+      : client?.name ?? user.company_name ?? null;
+    return {
+      ...user,
+      context_label,
+      project_id: primary?.id ?? null,
+      project_name: primary?.name ?? null,
+      client_name: client?.name ?? user.company_name ?? null,
+    };
+  }
+
+  if (user.role === "sales") {
+    const assigned = projects.filter((p) => p.assigned_to === user.id);
+    const primary = pickPrimaryProject(assigned);
+    const context_label = primary
+      ? `${primary.id} · ${primary.name}`
+      : user.company_name ?? "Sales";
+    return {
+      ...user,
+      context_label,
+      project_id: primary?.id ?? null,
+      project_name: primary?.name ?? null,
+      client_name: null,
+    };
+  }
+
+  return {
+    ...user,
+    context_label: user.company_name ?? "SN Web Design",
+    project_id: null,
+    project_name: null,
+    client_name: null,
+  };
 }
 
 function fullNameSort(u: DbUser) {
   return [u.first_name, u.last_name, u.email].filter(Boolean).join(" ").toLowerCase();
+}
+
+function isPartnerTyping(row: Conversation, viewerId: string): boolean {
+  if (!row.typing_user_id || !row.typing_until) return false;
+  if (row.typing_user_id === viewerId) return false;
+  return new Date(row.typing_until).getTime() > Date.now();
 }
 
 function enrichConversation(
@@ -638,6 +725,7 @@ function enrichConversation(
     partner: users.find((u) => u.id === partnerId) ?? null,
     last_message: last,
     unread_count: unread,
+    partner_is_typing: isPartnerTyping(row, viewer.id),
   };
 }
 
@@ -716,6 +804,7 @@ export async function listConversations(viewer: DbUser): Promise<Conversation[]>
       partner: users.find((u) => u.id === partnerId) ?? null,
       last_message: lastByConv.get(c.id) ?? null,
       unread_count: unreadCount.get(c.id) ?? 0,
+      partner_is_typing: isPartnerTyping(c, viewer.id),
     };
   });
 }
@@ -758,7 +847,28 @@ export async function getConversationForViewer(
     .eq("id", partnerId)
     .maybeSingle();
 
-  return { ...row, partner: (partner as DbUser) ?? null };
+  return {
+    ...row,
+    partner: (partner as DbUser) ?? null,
+    partner_is_typing: isPartnerTyping(row, viewer.id),
+  };
+}
+
+export async function getConversationTyping(
+  conversationId: string,
+  viewer: DbUser
+): Promise<{ isTyping: boolean; name: string | null }> {
+  const conversation = await getConversationForViewer(conversationId, viewer);
+  if (!conversation) return { isTyping: false, name: null };
+  if (!isPartnerTyping(conversation, viewer.id)) {
+    return { isTyping: false, name: null };
+  }
+  const name = conversation.partner
+    ? [conversation.partner.first_name, conversation.partner.last_name]
+        .filter(Boolean)
+        .join(" ") || conversation.partner.email
+    : null;
+  return { isTyping: true, name };
 }
 
 export async function listMessages(

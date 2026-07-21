@@ -3,17 +3,20 @@
 import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { MessageSquare, Send } from "lucide-react";
+import { Bell, MessageSquare, Send } from "lucide-react";
 import {
+  fetchTypingPresence,
   markConversationRead,
   sendMessage,
-  startConversation,
+  sendPing,
+  setTypingPresence,
 } from "@/lib/actions/messages";
-import type { Conversation, DbUser, Message } from "@/lib/types";
+import type { ChatPartnerOption, Conversation, DbUser, Message } from "@/lib/types";
 import { cn, fullName } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { NewChatDialog } from "@/components/chat/new-chat-dialog";
 
 function formatMessageTime(value: string) {
   return new Intl.DateTimeFormat("en-US", {
@@ -35,10 +38,38 @@ function partnerLabel(user: DbUser | null | undefined) {
   return fullName(user.first_name, user.last_name);
 }
 
+function partnerContext(
+  user: DbUser | null | undefined,
+  byId: Map<string, ChatPartnerOption>
+) {
+  if (!user) return null;
+  return byId.get(user.id)?.context_label ?? user.company_name ?? null;
+}
+
+function isPingMessage(message: Message) {
+  return message.kind === "ping" || message.body === "🔔 Ping";
+}
+
+function previewBody(message: Message | null | undefined) {
+  if (!message) return "No messages yet";
+  if (isPingMessage(message)) return "🔔 Ping";
+  return message.body;
+}
+
+function TypingDots() {
+  return (
+    <span className="inline-flex items-center gap-0.5" aria-hidden>
+      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-current [animation-delay:-0.2s]" />
+      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-current [animation-delay:-0.1s]" />
+      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-current" />
+    </span>
+  );
+}
+
 type MessagesInboxProps = {
   viewer: DbUser;
   conversations: Conversation[];
-  partners: DbUser[];
+  partners: ChatPartnerOption[];
   activeConversationId: string | null;
   messages: Message[];
   basePath: string;
@@ -58,17 +89,21 @@ export function MessagesInbox({
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
+  const [partnerTyping, setPartnerTyping] = useState(false);
+  const [typingName, setTypingName] = useState<string | null>(null);
+  const [pingCooldownUntil, setPingCooldownUntil] = useState(0);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastTypingSent = useRef(0);
 
   const active = conversations.find((c) => c.id === activeConversationId) ?? null;
-  const existingPartnerIds = new Set(
-    conversations.map((c) => c.partner?.id).filter(Boolean) as string[]
-  );
-  const startablePartners = partners.filter((p) => !existingPartnerIds.has(p.id));
+  const partnerById = new Map(partners.map((p) => [p.id, p]));
+  const activeContext = partnerContext(active?.partner, partnerById);
+  const pingReady = Date.now() >= pingCooldownUntil;
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages.length, activeConversationId]);
+  }, [messages.length, activeConversationId, partnerTyping]);
 
   useEffect(() => {
     if (!activeConversationId || !active?.unread_count) return;
@@ -80,12 +115,73 @@ export function MessagesInbox({
     return () => window.clearInterval(id);
   }, [router]);
 
+  useEffect(() => {
+    setPartnerTyping(Boolean(active?.partner_is_typing));
+    setTypingName(active?.partner ? partnerLabel(active.partner) : null);
+  }, [active?.partner_is_typing, active?.partner, activeConversationId]);
+
+  useEffect(() => {
+    if (!activeConversationId) return;
+    let cancelled = false;
+
+    async function poll() {
+      try {
+        const presence = await fetchTypingPresence(activeConversationId!);
+        if (cancelled) return;
+        setPartnerTyping(presence.isTyping);
+        setTypingName(presence.name);
+      } catch {
+        // ignore transient presence errors
+      }
+    }
+
+    void poll();
+    const id = window.setInterval(poll, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [activeConversationId]);
+
+  useEffect(() => {
+    return () => {
+      if (typingTimer.current) clearTimeout(typingTimer.current);
+      if (activeConversationId) {
+        void setTypingPresence(activeConversationId, false).catch(() => undefined);
+      }
+    };
+  }, [activeConversationId]);
+
+  function signalTyping() {
+    if (!activeConversationId) return;
+    const now = Date.now();
+    if (now - lastTypingSent.current < 1500) {
+      if (typingTimer.current) clearTimeout(typingTimer.current);
+      typingTimer.current = setTimeout(() => {
+        lastTypingSent.current = Date.now();
+        void setTypingPresence(activeConversationId, true).catch(() => undefined);
+      }, 400);
+      return;
+    }
+    lastTypingSent.current = now;
+    void setTypingPresence(activeConversationId, true).catch(() => undefined);
+  }
+
+  function onDraftChange(value: string) {
+    setDraft(value);
+    if (value.trim()) signalTyping();
+    else if (activeConversationId) {
+      void setTypingPresence(activeConversationId, false).catch(() => undefined);
+    }
+  }
+
   function onSend(e: React.FormEvent) {
     e.preventDefault();
     if (!activeConversationId || !draft.trim()) return;
     const body = draft.trim();
     setDraft("");
     setError(null);
+    void setTypingPresence(activeConversationId, false).catch(() => undefined);
     startTransition(async () => {
       try {
         await sendMessage(activeConversationId, body);
@@ -97,24 +193,29 @@ export function MessagesInbox({
     });
   }
 
-  function onStart(partnerId: string) {
+  function onPing() {
+    if (!activeConversationId || !pingReady) return;
     setError(null);
+    setPingCooldownUntil(Date.now() + 30_000);
     startTransition(async () => {
       try {
-        const id = await startConversation(partnerId);
-        router.push(`${basePath}?c=${id}`);
+        await sendPing(activeConversationId);
         router.refresh();
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to start chat");
+        setPingCooldownUntil(0);
+        setError(err instanceof Error ? err.message : "Failed to ping");
       }
     });
   }
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="font-display text-3xl">Messages</h1>
-        <p className="mt-1 text-slate-500">{subtitle}</p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="font-display text-3xl">Messages</h1>
+          <p className="mt-1 text-slate-500">{subtitle}</p>
+        </div>
+        <NewChatDialog partners={partners} basePath={basePath} />
       </div>
 
       {error && (
@@ -125,17 +226,24 @@ export function MessagesInbox({
 
       <div className="grid min-h-[32rem] overflow-hidden rounded-xl border border-slate-200 bg-white lg:grid-cols-[18rem_1fr]">
         <aside className="flex flex-col border-b border-slate-200 lg:border-b-0 lg:border-r">
-          <div className="border-b border-slate-100 px-4 py-3">
+          <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
             <p className="text-xs font-medium uppercase tracking-wide text-slate-400">
               Conversations
             </p>
+            <NewChatDialog partners={partners} basePath={basePath} variant="ghost" size="sm" />
           </div>
           <div className="max-h-56 flex-1 overflow-y-auto lg:max-h-none">
             {conversations.length === 0 ? (
-              <p className="px-4 py-6 text-sm text-slate-500">No conversations yet.</p>
+              <div className="space-y-3 px-4 py-6 text-center">
+                <p className="text-sm text-slate-500">No conversations yet.</p>
+                <NewChatDialog partners={partners} basePath={basePath} variant="outline" size="sm" />
+              </div>
             ) : (
               conversations.map((conversation) => {
                 const selected = conversation.id === activeConversationId;
+                const context = partnerContext(conversation.partner, partnerById);
+                const typingHere =
+                  selected ? partnerTyping : Boolean(conversation.partner_is_typing);
                 return (
                   <Link
                     key={conversation.id}
@@ -150,8 +258,17 @@ export function MessagesInbox({
                         <p className="truncate text-sm font-medium text-slate-900">
                           {partnerLabel(conversation.partner)}
                         </p>
+                        {context && (
+                          <p className="mt-0.5 truncate text-xs text-teal-700">{context}</p>
+                        )}
                         <p className="mt-0.5 truncate text-xs text-slate-500">
-                          {conversation.last_message?.body ?? "No messages yet"}
+                          {typingHere ? (
+                            <span className="inline-flex items-center gap-1 text-teal-700">
+                              typing <TypingDots />
+                            </span>
+                          ) : (
+                            previewBody(conversation.last_message)
+                          )}
                         </p>
                       </div>
                       <div className="flex shrink-0 flex-col items-end gap-1">
@@ -172,48 +289,51 @@ export function MessagesInbox({
               })
             )}
           </div>
-
-          {startablePartners.length > 0 && (
-            <div className="border-t border-slate-100 p-3">
-              <p className="mb-2 text-xs font-medium uppercase tracking-wide text-slate-400">
-                Start a chat
-              </p>
-              <div className="max-h-40 space-y-1 overflow-y-auto">
-                {startablePartners.map((partner) => (
-                  <button
-                    key={partner.id}
-                    type="button"
-                    disabled={pending}
-                    onClick={() => onStart(partner.id)}
-                    className="flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-sm hover:bg-slate-50 disabled:opacity-50"
-                  >
-                    <span className="truncate">{partnerLabel(partner)}</span>
-                    <Badge variant="outline" className="text-[10px]">
-                      {roleLabel(partner.role)}
-                    </Badge>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
         </aside>
 
         <section className="flex min-h-[24rem] flex-col">
           {!active ? (
-            <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center text-slate-500">
+            <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-slate-500">
               <MessageSquare className="h-8 w-8 text-slate-300" />
-              <p className="text-sm">Select a conversation or start a new one.</p>
+              <p className="text-sm">Select a conversation or start a new chat.</p>
+              <NewChatDialog partners={partners} basePath={basePath} variant="outline" />
             </div>
           ) : (
             <>
               <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
                 <div>
                   <p className="font-medium text-slate-900">{partnerLabel(active.partner)}</p>
+                  {activeContext && (
+                    <p className="text-xs text-teal-700">{activeContext}</p>
+                  )}
                   <p className="text-xs text-slate-500">
-                    {active.partner ? roleLabel(active.partner.role) : ""}
-                    {active.partner?.email ? ` · ${active.partner.email}` : ""}
+                    {partnerTyping ? (
+                      <span className="inline-flex items-center gap-1.5 text-teal-700">
+                        {typingName || "Someone"} is typing <TypingDots />
+                      </span>
+                    ) : (
+                      <>
+                        {active.partner ? roleLabel(active.partner.role) : ""}
+                        {active.partner?.email ? ` · ${active.partner.email}` : ""}
+                      </>
+                    )}
                   </p>
                 </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={pending || !pingReady}
+                  onClick={onPing}
+                  title={
+                    pingReady
+                      ? "Send a ping to get their attention"
+                      : "Ping cooldown — try again shortly"
+                  }
+                >
+                  <Bell className="h-4 w-4" />
+                  Ping
+                </Button>
               </div>
 
               <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
@@ -224,6 +344,20 @@ export function MessagesInbox({
                 ) : (
                   messages.map((message) => {
                     const mine = message.sender_id === viewer.id;
+                    if (isPingMessage(message)) {
+                      return (
+                        <div key={message.id} className="flex justify-center py-1">
+                          <div className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-center text-xs text-amber-900">
+                            <span className="font-medium">
+                              {mine ? "You pinged" : `${partnerLabel(message.sender) || "They"} pinged`}
+                            </span>
+                            <span className="ml-2 text-amber-700/80">
+                              {formatMessageTime(message.created_at)}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    }
                     return (
                       <div
                         key={message.id}
@@ -251,6 +385,15 @@ export function MessagesInbox({
                     );
                   })
                 )}
+                {partnerTyping && (
+                  <div className="flex justify-start">
+                    <div className="rounded-2xl bg-slate-100 px-3.5 py-2 text-xs text-slate-500">
+                      <span className="inline-flex items-center gap-1.5">
+                        {typingName || "Someone"} is typing <TypingDots />
+                      </span>
+                    </div>
+                  </div>
+                )}
                 <div ref={bottomRef} />
               </div>
 
@@ -258,7 +401,7 @@ export function MessagesInbox({
                 <div className="flex items-end gap-2">
                   <Textarea
                     value={draft}
-                    onChange={(e) => setDraft(e.target.value)}
+                    onChange={(e) => onDraftChange(e.target.value)}
                     placeholder="Write a message…"
                     rows={2}
                     className="min-h-[2.75rem] resize-none"
@@ -269,6 +412,17 @@ export function MessagesInbox({
                       }
                     }}
                   />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    disabled={pending || !pingReady}
+                    onClick={onPing}
+                    title="Ping"
+                  >
+                    <Bell className="h-4 w-4" />
+                    <span className="sr-only">Ping</span>
+                  </Button>
                   <Button type="submit" disabled={pending || !draft.trim()} size="icon">
                     <Send className="h-4 w-4" />
                     <span className="sr-only">Send</span>

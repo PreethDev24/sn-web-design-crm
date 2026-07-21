@@ -27,20 +27,34 @@ export interface Conversation {
   last_message_at: string;
   created_at: string;
   updated_at: string;
+  typing_user_id?: string | null;
+  typing_until?: string | null;
   /** The other person in this thread relative to the current viewer */
   partner?: DbUser | null;
   last_message?: Message | null;
   unread_count?: number;
+  partner_is_typing?: boolean;
 }
+
+export type MessageKind = "text" | "ping";
 
 export interface Message {
   id: string;
   conversation_id: string;
   sender_id: string;
   body: string;
+  kind?: MessageKind;
   created_at: string;
   read_at: string | null;
   sender?: DbUser | null;
+}
+
+/** Chat recipient with identifying project/company context for pickers */
+export interface ChatPartnerOption extends DbUser {
+  context_label: string | null;
+  project_id: string | null;
+  project_name: string | null;
+  client_name: string | null;
 }
 
 export interface DbUser {
