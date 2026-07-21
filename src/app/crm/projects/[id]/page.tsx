@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ProjectStaffActions } from "@/components/crm/project-staff-actions";
 import { ActivityForm } from "@/components/crm/activity-form";
+import { TerminateProjectButton } from "@/components/crm/terminate-project-button";
 
 function statusIndex(status: ProjectStatus) {
   const idx = PROJECT_STATUSES.indexOf(status);
@@ -36,20 +37,29 @@ export default async function ProjectDetailPage({
 
   return (
     <div className="space-y-6">
-      <div>
-        <Link href="/crm/projects" className="text-sm text-teal-700 hover:underline">
-          ← Projects
-        </Link>
-        <div className="mt-2 flex flex-wrap items-center gap-3">
-          <h1 className="font-display text-3xl">{project.name}</h1>
-          <Badge>{project.status}</Badge>
-          {!canManage && (
-            <Badge variant="secondary">View only</Badge>
-          )}
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <Link href="/crm/projects" className="text-sm text-teal-700 hover:underline">
+            ← Projects
+          </Link>
+          <div className="mt-2 flex flex-wrap items-center gap-3">
+            <h1 className="font-display text-3xl">{project.name}</h1>
+            <Badge variant={project.status === "terminated" ? "danger" : "default"}>
+              {project.status}
+            </Badge>
+            {!canManage && <Badge variant="secondary">View only</Badge>}
+          </div>
+          <p className="text-slate-500">
+            {project.client?.name} · <span className="font-mono">{project.id}</span>
+          </p>
         </div>
-        <p className="text-slate-500">
-          {project.client?.name} · <span className="font-mono">{project.id}</span>
-        </p>
+        {canManage && (
+          <TerminateProjectButton
+            projectId={project.id}
+            projectName={project.name}
+            status={project.status}
+          />
+        )}
       </div>
 
       <Card>
@@ -72,7 +82,7 @@ export default async function ProjectDetailPage({
             </div>
           </div>
           <ol className="grid gap-2 sm:grid-cols-3 lg:grid-cols-5">
-            {PROJECT_STATUSES.filter((s) => s !== "on_hold").map((stage) => {
+            {PROJECT_STATUSES.filter((s) => s !== "on_hold" && s !== "terminated").map((stage) => {
               const idx = statusIndex(stage);
               const done = idx < currentIdx || project.status === "completed";
               const active = stage === project.status;
@@ -168,7 +178,18 @@ export default async function ProjectDetailPage({
         </div>
 
         {canManage || canUpload ? (
-          <ProjectStaffActions project={project} canManage={canManage} canUpload={canUpload} />
+          project.status === "terminated" ? (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Terminated</CardTitle>
+              </CardHeader>
+              <CardContent className="text-sm text-slate-600">
+                This project has been terminated. History and deliverables remain available.
+              </CardContent>
+            </Card>
+          ) : (
+            <ProjectStaffActions project={project} canManage={canManage} canUpload={canUpload} />
+          )
         ) : (
           <Card>
             <CardHeader>

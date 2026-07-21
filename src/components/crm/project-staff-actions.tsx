@@ -57,7 +57,7 @@ export function ProjectStaffActions({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {PROJECT_STATUSES.map((s) => (
+                {PROJECT_STATUSES.filter((s) => s !== "terminated").map((s) => (
                   <SelectItem key={s} value={s}>
                     {s}
                   </SelectItem>

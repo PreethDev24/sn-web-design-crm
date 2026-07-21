@@ -48,7 +48,9 @@ export default async function ProjectsPage() {
                       />
                     </div>
                   </div>
-                  <Badge>{project.status}</Badge>
+                  <Badge variant={project.status === "terminated" ? "danger" : "default"}>
+                    {project.status}
+                  </Badge>
                 </div>
               </CardContent>
             </Card>

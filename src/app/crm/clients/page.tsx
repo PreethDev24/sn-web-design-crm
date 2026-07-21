@@ -27,8 +27,16 @@ export default async function ClientsPage() {
                   <p className="font-medium">{client.name}</p>
                   <p className="text-sm text-slate-500">{client.email || "No email"}</p>
                 </div>
-                <Badge variant={client.status === "active" ? "success" : "secondary"}>
-                  {client.status}
+                <Badge
+                  variant={
+                    client.status === "churned"
+                      ? "danger"
+                      : client.status === "active"
+                        ? "success"
+                        : "secondary"
+                  }
+                >
+                  {client.status === "churned" ? "terminated" : client.status}
                 </Badge>
               </CardContent>
             </Card>

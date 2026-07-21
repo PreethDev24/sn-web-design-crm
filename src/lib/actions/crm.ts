@@ -587,6 +587,124 @@ export async function createClient(formData: FormData) {
   revalidatePath("/crm/clients");
 }
 
+export async function terminateClient(clientId: string) {
+  await requireOwner();
+  if (!clientId) throw new Error("Client id is required");
+
+  if (isDemoMode()) {
+    mutateStore((store) => {
+      const client = store.clients.find((c) => c.id === clientId);
+      if (!client) throw new Error("Client not found");
+      if (client.status === "churned") throw new Error("Client is already terminated");
+      client.status = "churned";
+      client.updated_at = touch();
+      for (const project of store.projects) {
+        if (
+          project.client_id === clientId &&
+          project.status !== "completed" &&
+          project.status !== "terminated"
+        ) {
+          project.status = "terminated";
+          project.updated_at = touch();
+        }
+      }
+      store.activities.unshift({
+        id: newId("act"),
+        type: "system",
+        body: "Client terminated by owner",
+        lead_id: null,
+        deal_id: null,
+        client_id: clientId,
+        project_id: null,
+        author_id: null,
+        created_at: touch(),
+      });
+    });
+    revalidatePath("/crm/clients");
+    revalidatePath(`/crm/clients/${clientId}`);
+    revalidatePath("/crm/projects");
+    return;
+  }
+
+  const supabase = requireDb();
+  const { data: client, error: fetchError } = await supabase
+    .from("clients")
+    .select("id, status")
+    .eq("id", clientId)
+    .maybeSingle();
+  if (fetchError) throw new Error(fetchError.message);
+  if (!client) throw new Error("Client not found");
+  if (client.status === "churned") throw new Error("Client is already terminated");
+
+  const { error } = await supabase
+    .from("clients")
+    .update({ status: "churned" })
+    .eq("id", clientId);
+  if (error) throw new Error(error.message);
+
+  await supabase
+    .from("projects")
+    .update({ status: "terminated" })
+    .eq("client_id", clientId)
+    .not("status", "in", '("completed","terminated")');
+
+  await supabase.from("activities").insert({
+    type: "system",
+    body: "Client terminated by owner",
+    client_id: clientId,
+    author_id: null,
+  });
+
+  revalidatePath("/crm/clients");
+  revalidatePath(`/crm/clients/${clientId}`);
+  revalidatePath("/crm/projects");
+}
+
+export async function reactivateClient(clientId: string) {
+  await requireOwner();
+  if (!clientId) throw new Error("Client id is required");
+
+  if (isDemoMode()) {
+    mutateStore((store) => {
+      const client = store.clients.find((c) => c.id === clientId);
+      if (!client) throw new Error("Client not found");
+      client.status = "active";
+      client.updated_at = touch();
+      store.activities.unshift({
+        id: newId("act"),
+        type: "system",
+        body: "Client reactivated by owner",
+        lead_id: null,
+        deal_id: null,
+        client_id: clientId,
+        project_id: null,
+        author_id: null,
+        created_at: touch(),
+      });
+    });
+    revalidatePath("/crm/clients");
+    revalidatePath(`/crm/clients/${clientId}`);
+    return;
+  }
+
+  const supabase = requireDb();
+  const { error } = await supabase
+    .from("clients")
+    .update({ status: "active" })
+    .eq("id", clientId);
+  if (error) throw new Error(error.message);
+
+  await supabase.from("activities").insert({
+    type: "system",
+    body: "Client reactivated by owner",
+    client_id: clientId,
+    author_id: null,
+  });
+
+  revalidatePath("/crm/clients");
+  revalidatePath(`/crm/clients/${clientId}`);
+}
+
 export async function inviteTeamMember(formData: FormData) {
   await requireOwner();
   const email = String(formData.get("email") || "").trim();

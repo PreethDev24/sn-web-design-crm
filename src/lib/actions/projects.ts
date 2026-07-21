@@ -1,7 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { requireClient, requireStaff } from "@/lib/auth/roles";
+import { requireClient, requireOwner, requireStaff } from "@/lib/auth/roles";
 import { canManageDeliverables, canManageProjects } from "@/lib/auth/roles-shared";
 import { getSupabaseAdmin, isSupabaseConfigured } from "@/lib/db/supabase";
 import { isDemoMode } from "@/lib/demo/mode";
@@ -120,6 +120,66 @@ export async function updateProjectStatus(projectId: string, status: ProjectStat
   if (progressMap[status] !== undefined) update.progress = progressMap[status];
   const { error } = await supabase.from("projects").update(update).eq("id", projectId);
   if (error) throw new Error(error.message);
+  revalidatePath("/crm/projects");
+  revalidatePath(`/crm/projects/${projectId}`);
+  revalidatePath(`/portal/projects/${projectId}`);
+}
+
+export async function terminateProject(projectId: string) {
+  await requireOwner();
+  if (!projectId) throw new Error("Project id is required");
+
+  if (isDemoMode()) {
+    mutateStore((store) => {
+      const project = store.projects.find((p) => p.id === projectId);
+      if (!project) throw new Error("Project not found");
+      if (project.status === "terminated") {
+        throw new Error("Project is already terminated");
+      }
+      project.status = "terminated";
+      project.updated_at = touch();
+      store.activities.unshift({
+        id: newId("act"),
+        type: "system",
+        body: "Project terminated by owner",
+        lead_id: null,
+        deal_id: null,
+        client_id: project.client_id,
+        project_id: projectId,
+        author_id: null,
+        created_at: touch(),
+      });
+    });
+    revalidatePath("/crm/projects");
+    revalidatePath(`/crm/projects/${projectId}`);
+    revalidatePath(`/portal/projects/${projectId}`);
+    return;
+  }
+
+  const supabase = requireDb();
+  const { data: project, error: fetchError } = await supabase
+    .from("projects")
+    .select("id, status, client_id")
+    .eq("id", projectId)
+    .maybeSingle();
+  if (fetchError) throw new Error(fetchError.message);
+  if (!project) throw new Error("Project not found");
+  if (project.status === "terminated") throw new Error("Project is already terminated");
+
+  const { error } = await supabase
+    .from("projects")
+    .update({ status: "terminated" })
+    .eq("id", projectId);
+  if (error) throw new Error(error.message);
+
+  await supabase.from("activities").insert({
+    type: "system",
+    body: "Project terminated by owner",
+    client_id: project.client_id,
+    project_id: projectId,
+    author_id: null,
+  });
+
   revalidatePath("/crm/projects");
   revalidatePath(`/crm/projects/${projectId}`);
   revalidatePath(`/portal/projects/${projectId}`);

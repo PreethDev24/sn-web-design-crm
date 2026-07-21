@@ -12,7 +12,8 @@ export type ProjectStatus =
   | "launch"
   | "maintenance"
   | "completed"
-  | "on_hold";
+  | "on_hold"
+  | "terminated";
 export type DeliverableStatus = "draft" | "in_review" | "changes_requested" | "approved";
 export type ContractStatus = "draft" | "sent" | "viewed" | "signed" | "expired";
 export type InvoiceStatus = "draft" | "sent" | "viewed" | "paid" | "overdue" | "cancelled";
@@ -259,4 +260,5 @@ export const PROJECT_STATUSES: ProjectStatus[] = [
   "maintenance",
   "completed",
   "on_hold",
+  "terminated",
 ];
