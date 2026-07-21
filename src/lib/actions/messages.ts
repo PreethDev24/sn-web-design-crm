@@ -52,7 +52,9 @@ async function assertCanMessage(viewer: DbUser, partnerId: string) {
   const partner = await loadUserById(partnerId);
   if (!partner) throw new Error("User not found");
   if (!canChatRoles(viewer.role, partner.role)) {
-    throw new Error("You can only message owners with clients or sales reps");
+    throw new Error(
+      "You can only message between owners, or owners with clients/sales"
+    );
   }
   return partner;
 }

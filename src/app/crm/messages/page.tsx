@@ -47,7 +47,7 @@ export default async function CrmMessagesPage({
         basePath="/crm/messages"
         subtitle={
           user.role === "owner"
-            ? "Message clients and sales reps — use New chat to pick who you're writing to"
+            ? "Message other owners, clients, and sales reps — use New chat to pick who you're writing to"
             : "Message owners — use New chat to pick who you're writing to"
         }
       />
