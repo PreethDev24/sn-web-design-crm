@@ -1,3 +1,5 @@
+import { readFileSync } from "fs";
+import path from "path";
 import { isDemoMode } from "@/lib/demo/mode";
 import { sendGmail, isGmailConfigured } from "@/lib/email/gmail";
 import { fullName } from "@/lib/utils";
@@ -18,13 +20,19 @@ function appBaseUrl() {
   );
 }
 
-function messagesPathForRole(role: UserRole, conversationId: string) {
+/** Deep link straight into that conversation thread. */
+export function conversationThreadUrl(role: UserRole, conversationId: string) {
   const base = role === "client" ? "/portal/messages" : "/crm/messages";
-  return `${base}?c=${conversationId}`;
+  return `${appBaseUrl()}${base}?c=${encodeURIComponent(conversationId)}`;
 }
 
 function senderLabel(user: DbUser) {
   return fullName(user.first_name, user.last_name) || user.email || "Someone";
+}
+
+function renderTemplate(fileName: string, threadUrl: string) {
+  const filePath = path.join(process.cwd(), "src/lib/email/templates", fileName);
+  return readFileSync(filePath, "utf8").split("{{THREAD_URL}}").join(threadUrl);
 }
 
 export async function notifyChatPing(params: {
@@ -35,17 +43,15 @@ export async function notifyChatPing(params: {
   if (isDemoMode() || !isGmailConfigured()) return;
   if (!params.recipient.email || params.recipient.email === params.sender.email) return;
 
-  const link = `${appBaseUrl()}${messagesPathForRole(params.recipient.role, params.conversationId)}`;
+  const link = conversationThreadUrl(params.recipient.role, params.conversationId);
   const who = senderLabel(params.sender);
+  const html = renderTemplate("ping.html", link);
 
   await sendGmail({
     to: params.recipient.email,
-    subject: `${who} pinged you on SN Web Design`,
-    text: `${who} sent you a ping.\n\nOpen the conversation:\n${link}\n`,
-    html: `
-      <p><strong>${who}</strong> pinged you on SN Web Design.</p>
-      <p><a href="${link}">Open conversation</a></p>
-    `,
+    subject: `${who} tagged you in a message — SN Web Design`,
+    text: `${who} tagged you in a message on SN Web Design.\n\nOpen the conversation:\n${link}\n`,
+    html,
   });
 }
 
@@ -59,20 +65,15 @@ export async function notifyChatMessageIfOffline(params: {
   if (!params.recipient.email || params.recipient.email === params.sender.email) return;
   if (isUserOnline(params.recipient)) return;
 
-  const link = `${appBaseUrl()}${messagesPathForRole(params.recipient.role, params.conversationId)}`;
+  const link = conversationThreadUrl(params.recipient.role, params.conversationId);
   const who = senderLabel(params.sender);
   const preview = params.preview.trim().slice(0, 280);
+  const html = renderTemplate("missed-message.html", link);
 
   await sendGmail({
     to: params.recipient.email,
-    subject: `New message from ${who}`,
+    subject: `You have a missed message from ${who} — SN Web Design`,
     text: `${who} sent you a message while you were offline:\n\n"${preview}"\n\nOpen the conversation:\n${link}\n`,
-    html: `
-      <p><strong>${who}</strong> sent you a message while you were offline:</p>
-      <blockquote style="border-left:3px solid #0f766e;padding-left:12px;color:#334155;">
-        ${preview.replace(/</g, "&lt;")}
-      </blockquote>
-      <p><a href="${link}">Open conversation</a></p>
-    `,
+    html,
   });
 }
