@@ -19,7 +19,7 @@ export default async function TeamPage() {
   const user = await requireStaff();
   const isOwner = user.role === "owner";
   const [users, requests, inviteTableReady, salesProfiles] = await Promise.all([
-    isOwner ? listTeamUsers() : Promise.resolve([]),
+    listTeamUsers(user),
     listClientInviteRequests(user),
     clientInviteRequestsReady(),
     isOwner ? listSalesProfiles() : Promise.resolve([]),
@@ -36,14 +36,12 @@ export default async function TeamPage() {
           <p className="mt-1 text-slate-500">
             {isOwner
               ? "Invite staff, approve client portal requests, and manage people"
-              : "Request client portal access — owners must approve before an invite is sent"}
+              : "Request client portal access and view owners and clients (other sales are hidden)"}
           </p>
         </div>
-        {isOwner && (
-          <Button asChild variant="outline">
-            <Link href="/crm/contacts">Open contacts</Link>
-          </Button>
-        )}
+        <Button asChild variant="outline">
+          <Link href="/crm/contacts">Open contacts</Link>
+        </Button>
       </div>
 
       {!inviteTableReady && (
@@ -109,65 +107,69 @@ export default async function TeamPage() {
         </Card>
       )}
 
-      {isOwner && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">People</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {users.map((u) => {
-              const profile = profileByUser.get(u.id);
-              return (
-                <div
-                  key={u.id}
-                  className="rounded-md border border-slate-100 px-3 py-3"
-                >
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    <div>
-                      <p className="text-sm font-medium">
-                        {profile?.full_name || fullName(u.first_name, u.last_name)}
-                      </p>
-                      <p className="text-xs text-slate-500">{u.email}</p>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Badge variant="secondary" className="capitalize">
-                        {u.role}
-                      </Badge>
-                      {u.role === "sales" && (
-                        <Badge variant={profile ? "success" : "warning"}>
-                          {profile ? "Onboarded" : "Pending"}
-                        </Badge>
-                      )}
-                      <RemoveMemberButton member={u} currentUserId={user.id} />
-                    </div>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">
+            {isOwner ? "People" : "Owners & clients"}
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {users.map((u) => {
+            const profile = isOwner ? profileByUser.get(u.id) : undefined;
+            return (
+              <div
+                key={u.id}
+                className="rounded-md border border-slate-100 px-3 py-3"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-medium">
+                      {profile?.full_name || fullName(u.first_name, u.last_name)}
+                    </p>
+                    <p className="text-xs text-slate-500">{u.email}</p>
                   </div>
-                  {u.role === "sales" && profile && (
-                    <div className="mt-3 grid gap-1 text-xs text-slate-600 sm:grid-cols-3">
-                      <p>
-                        <span className="text-slate-400">Region:</span>{" "}
-                        {profile.target_region || "—"}
-                      </p>
-                      <p>
-                        <span className="text-slate-400">Calls/day:</span>{" "}
-                        {profile.daily_call_goal ?? "—"}
-                      </p>
-                      <p>
-                        <span className="text-slate-400">Meetings/week:</span>{" "}
-                        {profile.weekly_meeting_goal ?? "—"}
-                      </p>
-                    </div>
-                  )}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant="secondary" className="capitalize">
+                      {u.role}
+                    </Badge>
+                    {isOwner && u.role === "sales" && (
+                      <Badge variant={profile ? "success" : "warning"}>
+                        {profile ? "Onboarded" : "Pending"}
+                      </Badge>
+                    )}
+                    {isOwner && (
+                      <RemoveMemberButton member={u} currentUserId={user.id} />
+                    )}
+                  </div>
                 </div>
-              );
-            })}
-            {users.length === 0 && (
-              <p className="text-sm text-slate-500">
-                No users synced yet. Sign in once to create your owner account.
-              </p>
-            )}
-          </CardContent>
-        </Card>
-      )}
+                {isOwner && u.role === "sales" && profile && (
+                  <div className="mt-3 grid gap-1 text-xs text-slate-600 sm:grid-cols-3">
+                    <p>
+                      <span className="text-slate-400">Region:</span>{" "}
+                      {profile.target_region || "—"}
+                    </p>
+                    <p>
+                      <span className="text-slate-400">Calls/day:</span>{" "}
+                      {profile.daily_call_goal ?? "—"}
+                    </p>
+                    <p>
+                      <span className="text-slate-400">Meetings/week:</span>{" "}
+                      {profile.weekly_meeting_goal ?? "—"}
+                    </p>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {users.length === 0 && (
+            <p className="text-sm text-slate-500">
+              {isOwner
+                ? "No users synced yet. Sign in once to create your owner account."
+                : "No owners or clients to show yet."}
+            </p>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }

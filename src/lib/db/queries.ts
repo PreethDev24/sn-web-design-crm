@@ -398,18 +398,29 @@ export async function listActivities(filters: {
   return (data ?? []) as Activity[];
 }
 
-export async function listTeamUsers(): Promise<DbUser[]> {
+export async function listTeamUsers(viewer?: DbUser): Promise<DbUser[]> {
+  let users: DbUser[] = [];
+
   if (isDemoMode()) {
-    return [...readStore().users].sort((a, b) => b.created_at.localeCompare(a.created_at));
+    users = [...readStore().users].sort((a, b) => b.created_at.localeCompare(a.created_at));
+  } else if (!isSupabaseConfigured()) {
+    return emptyResult();
+  } else {
+    const { data, error } = await getSupabaseAdmin()
+      .from("users")
+      .select("*")
+      .in("role", ["owner", "sales", "client"] satisfies UserRole[])
+      .order("created_at", { ascending: false });
+    if (error) throw new Error(error.message);
+    users = (data ?? []) as DbUser[];
   }
-  if (!isSupabaseConfigured()) return emptyResult();
-  const { data, error } = await getSupabaseAdmin()
-    .from("users")
-    .select("*")
-    .in("role", ["owner", "sales", "client"] satisfies UserRole[])
-    .order("created_at", { ascending: false });
-  if (error) throw new Error(error.message);
-  return (data ?? []) as DbUser[];
+
+  // Sales reps must not see other sales (or themselves) — only owners and clients
+  if (viewer?.role === "sales") {
+    return users.filter((u) => u.role === "owner" || u.role === "client");
+  }
+
+  return users;
 }
 
 function withInviteRels(
@@ -538,6 +549,18 @@ export async function listSalesProfiles(): Promise<SalesProfile[]> {
   return (data ?? []) as SalesProfile[];
 }
 
+export async function listContactsForViewer(viewer: DbUser): Promise<{
+  users: DbUser[];
+  salesProfiles: SalesProfile[];
+}> {
+  const users = await listTeamUsers(viewer);
+  // Sales onboarding details are owner-only
+  const salesProfiles =
+    viewer.role === "owner" ? await listSalesProfiles() : [];
+  return { users, salesProfiles };
+}
+
+/** @deprecated Prefer listContactsForViewer — kept for any older imports */
 export async function listContactsForOwner(): Promise<{
   users: DbUser[];
   salesProfiles: SalesProfile[];

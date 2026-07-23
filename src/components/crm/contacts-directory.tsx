@@ -10,22 +10,30 @@ import { Button } from "@/components/ui/button";
 import { RemoveMemberButton } from "@/components/crm/remove-member-button";
 import { cn } from "@/lib/utils";
 
-const ROLE_FILTERS: Array<{ id: "all" | UserRole; label: string }> = [
-  { id: "all", label: "All" },
-  { id: "owner", label: "Owners" },
-  { id: "sales", label: "Sales" },
-  { id: "client", label: "Clients" },
-];
-
 export function ContactsDirectory({
   users,
   salesProfiles,
   currentUserId,
+  isOwner = true,
 }: {
   users: DbUser[];
   salesProfiles: SalesProfile[];
   currentUserId: string;
+  isOwner?: boolean;
 }) {
+  const roleFilters: Array<{ id: "all" | UserRole; label: string }> = isOwner
+    ? [
+        { id: "all", label: "All" },
+        { id: "owner", label: "Owners" },
+        { id: "sales", label: "Sales" },
+        { id: "client", label: "Clients" },
+      ]
+    : [
+        { id: "all", label: "All" },
+        { id: "owner", label: "Owners" },
+        { id: "client", label: "Clients" },
+      ];
+
   const [role, setRole] = useState<"all" | UserRole>("all");
   const [query, setQuery] = useState("");
 
@@ -38,10 +46,14 @@ export function ContactsDirectory({
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return users
-      .filter((u) => (role === "all" ? true : u.role === role))
+      .filter((u) => {
+        // Defense in depth: sales viewers never see sales contacts
+        if (!isOwner && u.role === "sales") return false;
+        return role === "all" ? true : u.role === role;
+      })
       .filter((u) => {
         if (!q) return true;
-        const profile = profileByUser.get(u.id);
+        const profile = isOwner ? profileByUser.get(u.id) : undefined;
         const haystack = [
           fullName(u.first_name, u.last_name),
           u.email,
@@ -64,12 +76,12 @@ export function ContactsDirectory({
           fullName(b.first_name, b.last_name)
         );
       });
-  }, [users, role, query, profileByUser]);
+  }, [users, role, query, profileByUser, isOwner]);
 
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center gap-2">
-        {ROLE_FILTERS.map((filter) => (
+        {roleFilters.map((filter) => (
           <Button
             key={filter.id}
             type="button"
@@ -85,13 +97,13 @@ export function ContactsDirectory({
       <Input
         value={query}
         onChange={(e) => setQuery(e.target.value)}
-        placeholder="Search by name, email, phone, region…"
+        placeholder="Search by name, email, phone…"
         className="max-w-md"
       />
 
       <div className="grid gap-4">
         {filtered.map((user) => {
-          const profile = profileByUser.get(user.id);
+          const profile = isOwner ? profileByUser.get(user.id) : undefined;
           return (
             <Card key={user.id}>
               <CardHeader className="flex flex-row items-start justify-between space-y-0 pb-3">
@@ -107,12 +119,14 @@ export function ContactsDirectory({
                   <Badge variant="secondary" className="capitalize">
                     {user.role}
                   </Badge>
-                  {user.role === "sales" && (
+                  {isOwner && user.role === "sales" && (
                     <Badge variant={profile ? "success" : "warning"}>
                       {profile ? "Onboarded" : "Pending onboarding"}
                     </Badge>
                   )}
-                  <RemoveMemberButton member={user} currentUserId={currentUserId} />
+                  {isOwner && (
+                    <RemoveMemberButton member={user} currentUserId={currentUserId} />
+                  )}
                 </div>
               </CardHeader>
               <CardContent className="space-y-3 text-sm">
@@ -120,12 +134,12 @@ export function ContactsDirectory({
                   <Info label="Phone" value={profile?.phone || user.phone || "—"} />
                   <Info label="Company" value={user.company_name || "—"} />
                   <Info label="Joined" value={formatDate(user.created_at)} />
-                  {user.role === "sales" && (
+                  {isOwner && user.role === "sales" && (
                     <Info label="Onboarded" value={formatDate(profile?.completed_at)} />
                   )}
                 </div>
 
-                {user.role === "sales" && profile && (
+                {isOwner && user.role === "sales" && profile && (
                   <div
                     className={cn(
                       "rounded-lg border border-slate-100 bg-slate-50/80 p-3",
@@ -154,7 +168,7 @@ export function ContactsDirectory({
                   </div>
                 )}
 
-                {user.role === "sales" && !profile && (
+                {isOwner && user.role === "sales" && !profile && (
                   <p className="text-slate-500">
                     This sales rep has not completed onboarding yet.
                   </p>

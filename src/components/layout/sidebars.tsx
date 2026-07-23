@@ -96,7 +96,7 @@ export function CrmSidebar({ isOwner, demo }: { isOwner: boolean; demo?: boolean
 
   const links = [
     ...staffLinks.filter((link) => isOwner || !salesHiddenHrefs.has(link.href)),
-    ...(isOwner ? [{ href: "/crm/contacts", label: "Contacts", icon: ContactRound }] : []),
+    { href: "/crm/contacts", label: "Contacts", icon: ContactRound },
     { href: "/crm/team", label: "Team", icon: UserPlus },
   ];
 
