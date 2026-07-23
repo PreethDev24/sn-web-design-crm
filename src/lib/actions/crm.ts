@@ -1,6 +1,7 @@
 "use server";
 
 import { requireOwner, requireStaff } from "@/lib/auth/roles";
+import { recordAuditLog } from "@/lib/audit/log";
 import { getSupabaseAdmin, isSupabaseConfigured } from "@/lib/db/supabase";
 import { isDemoMode } from "@/lib/demo/mode";
 import { ensureDemoInvite } from "@/lib/demo/auth";
@@ -588,11 +589,11 @@ export async function createClient(formData: FormData) {
 }
 
 export async function terminateClient(clientId: string) {
-  await requireOwner();
+  const owner = await requireOwner();
   if (!clientId) throw new Error("Client id is required");
 
   if (isDemoMode()) {
-    mutateStore((store) => {
+    const label = mutateStore((store) => {
       const client = store.clients.find((c) => c.id === clientId);
       if (!client) throw new Error("Client not found");
       if (client.status === "churned") throw new Error("Client is already terminated");
@@ -619,17 +620,26 @@ export async function terminateClient(clientId: string) {
         author_id: null,
         created_at: touch(),
       });
+      return client.name;
     });
     revalidatePath("/crm/clients");
     revalidatePath(`/crm/clients/${clientId}`);
     revalidatePath("/crm/projects");
+    await recordAuditLog({
+      action: "client.terminated",
+      actor: owner,
+      targetType: "client",
+      targetId: clientId,
+      targetLabel: label,
+      summary: `Terminated client ${label}`,
+    });
     return;
   }
 
   const supabase = requireDb();
   const { data: client, error: fetchError } = await supabase
     .from("clients")
-    .select("id, status")
+    .select("id, status, name")
     .eq("id", clientId)
     .maybeSingle();
   if (fetchError) throw new Error(fetchError.message);
@@ -658,14 +668,22 @@ export async function terminateClient(clientId: string) {
   revalidatePath("/crm/clients");
   revalidatePath(`/crm/clients/${clientId}`);
   revalidatePath("/crm/projects");
+  await recordAuditLog({
+    action: "client.terminated",
+    actor: owner,
+    targetType: "client",
+    targetId: clientId,
+    targetLabel: client.name,
+    summary: `Terminated client ${client.name}`,
+  });
 }
 
 export async function reactivateClient(clientId: string) {
-  await requireOwner();
+  const owner = await requireOwner();
   if (!clientId) throw new Error("Client id is required");
 
   if (isDemoMode()) {
-    mutateStore((store) => {
+    const label = mutateStore((store) => {
       const client = store.clients.find((c) => c.id === clientId);
       if (!client) throw new Error("Client not found");
       client.status = "active";
@@ -681,13 +699,27 @@ export async function reactivateClient(clientId: string) {
         author_id: null,
         created_at: touch(),
       });
+      return client.name;
     });
     revalidatePath("/crm/clients");
     revalidatePath(`/crm/clients/${clientId}`);
+    await recordAuditLog({
+      action: "client.reactivated",
+      actor: owner,
+      targetType: "client",
+      targetId: clientId,
+      targetLabel: label,
+      summary: `Reactivated client ${label}`,
+    });
     return;
   }
 
   const supabase = requireDb();
+  const { data: client } = await supabase
+    .from("clients")
+    .select("id, name")
+    .eq("id", clientId)
+    .maybeSingle();
   const { error } = await supabase
     .from("clients")
     .update({ status: "active" })
@@ -703,10 +735,18 @@ export async function reactivateClient(clientId: string) {
 
   revalidatePath("/crm/clients");
   revalidatePath(`/crm/clients/${clientId}`);
+  await recordAuditLog({
+    action: "client.reactivated",
+    actor: owner,
+    targetType: "client",
+    targetId: clientId,
+    targetLabel: client?.name ?? clientId,
+    summary: `Reactivated client ${client?.name ?? clientId}`,
+  });
 }
 
 export async function inviteTeamMember(formData: FormData) {
-  await requireOwner();
+  const owner = await requireOwner();
   const email = String(formData.get("email") || "").trim();
   const role = String(formData.get("role") || "sales") as UserRole;
   if (!email) throw new Error("Email is required");
@@ -716,6 +756,14 @@ export async function inviteTeamMember(formData: FormData) {
 
   await sendRoleInvitation(email, role);
   revalidatePath("/crm/team");
+  await recordAuditLog({
+    action: "member.invited",
+    actor: owner,
+    targetType: "user",
+    targetLabel: email,
+    summary: `Invited ${email} as ${role}`,
+    metadata: { email, role },
+  });
 }
 
 async function sendRoleInvitation(email: string, role: UserRole) {
@@ -826,6 +874,14 @@ export async function requestClientInvite(formData: FormData) {
       });
     });
     revalidatePath("/crm/team");
+    await recordAuditLog({
+      action: "client_invite.requested",
+      actor: user,
+      targetType: "invite_request",
+      targetLabel: email,
+      summary: `Requested client invite for ${email}`,
+      metadata: { email, clientName },
+    });
     return;
   }
 
@@ -862,6 +918,14 @@ export async function requestClientInvite(formData: FormData) {
     throw new Error(error.message);
   }
   revalidatePath("/crm/team");
+  await recordAuditLog({
+    action: "client_invite.requested",
+    actor: user,
+    targetType: "invite_request",
+    targetLabel: email,
+    summary: `Requested client invite for ${email}`,
+    metadata: { email, clientName },
+  });
 }
 
 export async function approveClientInviteRequest(requestId: string) {
@@ -880,6 +944,14 @@ export async function approveClientInviteRequest(requestId: string) {
     });
     await sendRoleInvitation(email, "client");
     revalidatePath("/crm/team");
+    await recordAuditLog({
+      action: "client_invite.approved",
+      actor: owner,
+      targetType: "invite_request",
+      targetId: requestId,
+      targetLabel: email,
+      summary: `Approved client invite for ${email}`,
+    });
     return;
   }
 
@@ -905,13 +977,21 @@ export async function approveClientInviteRequest(requestId: string) {
     .eq("id", requestId);
   if (error) throw new Error(error.message);
   revalidatePath("/crm/team");
+  await recordAuditLog({
+    action: "client_invite.approved",
+    actor: owner,
+    targetType: "invite_request",
+    targetId: requestId,
+    targetLabel: row.email,
+    summary: `Approved client invite for ${row.email}`,
+  });
 }
 
 export async function rejectClientInviteRequest(requestId: string, reviewNote?: string) {
   const owner = await requireOwner();
 
   if (isDemoMode()) {
-    mutateStore((store) => {
+    const email = mutateStore((store) => {
       const row = store.client_invite_requests.find((r) => r.id === requestId);
       if (!row) throw new Error("Request not found");
       if (row.status !== "pending") throw new Error("Request is no longer pending");
@@ -920,15 +1000,25 @@ export async function rejectClientInviteRequest(requestId: string, reviewNote?: 
       row.reviewed_at = touch();
       row.review_note = reviewNote?.trim() || null;
       row.updated_at = touch();
+      return row.email;
     });
     revalidatePath("/crm/team");
+    await recordAuditLog({
+      action: "client_invite.rejected",
+      actor: owner,
+      targetType: "invite_request",
+      targetId: requestId,
+      targetLabel: email,
+      summary: `Rejected client invite for ${email}`,
+      metadata: { reviewNote: reviewNote?.trim() || null },
+    });
     return;
   }
 
   const supabase = requireDb();
   const { data: row, error: fetchError } = await supabase
     .from("client_invite_requests")
-    .select("id, status")
+    .select("id, status, email")
     .eq("id", requestId)
     .maybeSingle();
   if (fetchError) throw new Error(fetchError.message);
@@ -946,87 +1036,21 @@ export async function rejectClientInviteRequest(requestId: string, reviewNote?: 
     .eq("id", requestId);
   if (error) throw new Error(error.message);
   revalidatePath("/crm/team");
+  await recordAuditLog({
+    action: "client_invite.rejected",
+    actor: owner,
+    targetType: "invite_request",
+    targetId: requestId,
+    targetLabel: row.email,
+    summary: `Rejected client invite for ${row.email}`,
+    metadata: { reviewNote: reviewNote?.trim() || null },
+  });
 }
 
 /**
  * Permanently remove a sales rep or client from Clerk + Supabase.
  * Owners cannot remove themselves or other owners.
+ * @deprecated Import from `@/lib/actions/members` instead.
  */
-export async function removePortalMember(userId: string) {
-  const owner = await requireOwner();
-  if (!userId) throw new Error("User id is required");
-  if (userId === owner.id) throw new Error("You cannot remove yourself");
+export { removePortalMember } from "@/lib/actions/members";
 
-  if (isDemoMode()) {
-    mutateStore((store) => {
-      const target = store.users.find((u) => u.id === userId);
-      if (!target) throw new Error("User not found");
-      if (target.role !== "sales" && target.role !== "client") {
-        throw new Error("Only sales reps and clients can be removed this way");
-      }
-      store.users = store.users.filter((u) => u.id !== userId);
-      store.sales_profiles = store.sales_profiles.filter((p) => p.user_id !== userId);
-      for (const client of store.clients) {
-        if (client.primary_user_id === userId) client.primary_user_id = null;
-      }
-    });
-    revalidatePath("/crm/team");
-    revalidatePath("/crm/contacts");
-    return;
-  }
-
-  const supabase = requireDb();
-  const { data: target, error: fetchError } = await supabase
-    .from("users")
-    .select("*")
-    .eq("id", userId)
-    .maybeSingle();
-  if (fetchError) throw new Error(fetchError.message);
-  if (!target) throw new Error("User not found");
-  if (target.role !== "sales" && target.role !== "client") {
-    throw new Error("Only sales reps and clients can be removed this way");
-  }
-
-  const clerkId = String(target.clerk_id || "");
-  const email = String(target.email || "").trim().toLowerCase();
-
-  if (clerkId && !clerkId.startsWith("demo-") && clerkId !== "local-dev-user") {
-    try {
-      const client = await clerkClient();
-      await client.users.deleteUser(clerkId);
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      if (!/not found|404|resource_not_found/i.test(message)) {
-        throw new Error(`Failed to delete Clerk user: ${message}`);
-      }
-    }
-  }
-
-  if (email) {
-    try {
-      const client = await clerkClient();
-      const { data: invitations } = await client.invitations.getInvitationList({
-        query: email,
-      });
-      await Promise.all(
-        invitations
-          .filter(
-            (inv) =>
-              inv.emailAddress.toLowerCase() === email && inv.status === "pending"
-          )
-          .map((inv) => client.invitations.revokeInvitation(inv.id))
-      );
-    } catch (e) {
-      console.warn("Could not revoke pending invitations:", e);
-    }
-  }
-
-  await supabase.from("clients").update({ primary_user_id: null }).eq("primary_user_id", userId);
-
-  const { error: deleteError } = await supabase.from("users").delete().eq("id", userId);
-  if (deleteError) throw new Error(deleteError.message);
-
-  revalidatePath("/crm/team");
-  revalidatePath("/crm/contacts");
-  revalidatePath("/crm/clients");
-}

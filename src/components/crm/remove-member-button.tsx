@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { Trash2 } from "lucide-react";
 import type { DbUser } from "@/lib/types";
-import { removePortalMember } from "@/lib/actions/crm";
+import { removePortalMember } from "@/lib/actions/members";
 import { fullName } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {

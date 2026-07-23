@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { requireClient, requireOwner, requireStaff } from "@/lib/auth/roles";
+import { recordAuditLog } from "@/lib/audit/log";
 import { canManageDeliverables, canManageProjects } from "@/lib/auth/roles-shared";
 import { getSupabaseAdmin, isSupabaseConfigured } from "@/lib/db/supabase";
 import { isDemoMode } from "@/lib/demo/mode";
@@ -102,20 +103,35 @@ export async function updateProjectStatus(projectId: string, status: ProjectStat
   };
 
   if (isDemoMode()) {
-    mutateStore((store) => {
+    const label = mutateStore((store) => {
       const project = store.projects.find((p) => p.id === projectId);
       if (!project) throw new Error("Project not found");
       project.status = status;
       if (progressMap[status] !== undefined) project.progress = progressMap[status]!;
       project.updated_at = touch();
+      return project.name;
     });
     revalidatePath("/crm/projects");
     revalidatePath(`/crm/projects/${projectId}`);
     revalidatePath(`/portal/projects/${projectId}`);
+    await recordAuditLog({
+      action: "project.status_changed",
+      actor: user,
+      targetType: "project",
+      targetId: projectId,
+      targetLabel: label,
+      summary: `Changed project ${label} status to ${status}`,
+      metadata: { status },
+    });
     return;
   }
 
   const supabase = requireDb();
+  const { data: project } = await supabase
+    .from("projects")
+    .select("id, name")
+    .eq("id", projectId)
+    .maybeSingle();
   const update: Record<string, unknown> = { status };
   if (progressMap[status] !== undefined) update.progress = progressMap[status];
   const { error } = await supabase.from("projects").update(update).eq("id", projectId);
@@ -123,14 +139,23 @@ export async function updateProjectStatus(projectId: string, status: ProjectStat
   revalidatePath("/crm/projects");
   revalidatePath(`/crm/projects/${projectId}`);
   revalidatePath(`/portal/projects/${projectId}`);
+  await recordAuditLog({
+    action: "project.status_changed",
+    actor: user,
+    targetType: "project",
+    targetId: projectId,
+    targetLabel: project?.name ?? projectId,
+    summary: `Changed project ${project?.name ?? projectId} status to ${status}`,
+    metadata: { status },
+  });
 }
 
 export async function terminateProject(projectId: string) {
-  await requireOwner();
+  const owner = await requireOwner();
   if (!projectId) throw new Error("Project id is required");
 
   if (isDemoMode()) {
-    mutateStore((store) => {
+    const label = mutateStore((store) => {
       const project = store.projects.find((p) => p.id === projectId);
       if (!project) throw new Error("Project not found");
       if (project.status === "terminated") {
@@ -149,17 +174,26 @@ export async function terminateProject(projectId: string) {
         author_id: null,
         created_at: touch(),
       });
+      return project.name;
     });
     revalidatePath("/crm/projects");
     revalidatePath(`/crm/projects/${projectId}`);
     revalidatePath(`/portal/projects/${projectId}`);
+    await recordAuditLog({
+      action: "project.terminated",
+      actor: owner,
+      targetType: "project",
+      targetId: projectId,
+      targetLabel: label,
+      summary: `Terminated project ${label}`,
+    });
     return;
   }
 
   const supabase = requireDb();
   const { data: project, error: fetchError } = await supabase
     .from("projects")
-    .select("id, status, client_id")
+    .select("id, status, client_id, name")
     .eq("id", projectId)
     .maybeSingle();
   if (fetchError) throw new Error(fetchError.message);
@@ -183,6 +217,14 @@ export async function terminateProject(projectId: string) {
   revalidatePath("/crm/projects");
   revalidatePath(`/crm/projects/${projectId}`);
   revalidatePath(`/portal/projects/${projectId}`);
+  await recordAuditLog({
+    action: "project.terminated",
+    actor: owner,
+    targetType: "project",
+    targetId: projectId,
+    targetLabel: project.name,
+    summary: `Terminated project ${project.name}`,
+  });
 }
 
 export async function createDeliverable(formData: FormData) {

@@ -17,6 +17,7 @@ import {
   LogOut,
   ContactRound,
   MessageSquare,
+  ScrollText,
 } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
@@ -98,6 +99,7 @@ export function CrmSidebar({ isOwner, demo }: { isOwner: boolean; demo?: boolean
     ...staffLinks.filter((link) => isOwner || !salesHiddenHrefs.has(link.href)),
     { href: "/crm/contacts", label: "Contacts", icon: ContactRound },
     { href: "/crm/team", label: "Team", icon: UserPlus },
+    ...(isOwner ? [{ href: "/crm/audit", label: "Audit log", icon: ScrollText }] : []),
   ];
 
   const Nav = (

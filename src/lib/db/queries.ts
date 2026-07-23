@@ -4,6 +4,7 @@ import { readStore } from "@/lib/demo/store";
 import { canAccessInvoices } from "@/lib/auth/roles-shared";
 import type {
   Activity,
+  AuditLog,
   ChatPartnerOption,
   Client,
   ClientInviteRequest,
@@ -923,6 +924,53 @@ export async function listMessages(
     throw new Error(error.message);
   }
   return (data ?? []) as Message[];
+}
+
+export function isMissingAuditLogsTable(error: {
+  message?: string;
+  code?: string;
+}): boolean {
+  const message = error.message || "";
+  return (
+    error.code === "PGRST205" ||
+    message.includes("audit_logs") ||
+    (message.includes("schema cache") && message.includes("audit_logs"))
+  );
+}
+
+export async function auditLogsReady(): Promise<boolean> {
+  if (isDemoMode()) return true;
+  if (!isSupabaseConfigured()) return false;
+  const { error } = await getSupabaseAdmin().from("audit_logs").select("id").limit(1);
+  return !error || !isMissingAuditLogsTable(error);
+}
+
+export async function listAuditLogs(limit = 200): Promise<AuditLog[]> {
+  if (isDemoMode()) {
+    const store = readStore();
+    return [...(store.audit_logs ?? [])]
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+      .slice(0, limit)
+      .map((row) => ({
+        ...row,
+        actor: row.actor_id
+          ? store.users.find((u) => u.id === row.actor_id) ?? null
+          : null,
+      }));
+  }
+  if (!isSupabaseConfigured()) return emptyResult();
+
+  const { data, error } = await getSupabaseAdmin()
+    .from("audit_logs")
+    .select("*, actor:users!actor_id(*)")
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    if (isMissingAuditLogsTable(error)) return emptyResult();
+    throw new Error(error.message);
+  }
+  return (data ?? []) as AuditLog[];
 }
 
 export { canChatRoles, orderedParticipantIds };

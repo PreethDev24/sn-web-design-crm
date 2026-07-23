@@ -216,6 +216,21 @@ export interface Activity {
   author?: DbUser | null;
 }
 
+export interface AuditLog {
+  id: string;
+  action: string;
+  actor_id: string | null;
+  actor_email: string | null;
+  actor_role: string | null;
+  target_type: string | null;
+  target_id: string | null;
+  target_label: string | null;
+  summary: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  actor?: DbUser | null;
+}
+
 export interface MaintenancePlan {
   id: string;
   client_id: string;

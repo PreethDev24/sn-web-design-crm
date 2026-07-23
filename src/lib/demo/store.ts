@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import type {
   Activity,
+  AuditLog,
   Client,
   ClientInviteRequest,
   Contract,
@@ -35,6 +36,7 @@ export type DemoStore = {
   sales_profiles: SalesProfile[];
   conversations: Conversation[];
   messages: Message[];
+  audit_logs: AuditLog[];
 };
 
 const DATA_DIR = path.join(process.cwd(), ".data");
@@ -244,6 +246,7 @@ function seedStore(): DemoStore {
     ],
     conversations: [],
     messages: [],
+    audit_logs: [],
   };
 }
 
@@ -263,6 +266,7 @@ export function readStore(): DemoStore {
   if (!store.sales_profiles) store.sales_profiles = [];
   if (!store.conversations) store.conversations = [];
   if (!store.messages) store.messages = [];
+  if (!store.audit_logs) store.audit_logs = [];
   return store;
 }
 

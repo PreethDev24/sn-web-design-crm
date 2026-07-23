@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
+import { recordAuditLog } from "@/lib/audit/log";
 import { getSupabaseAdmin, isSupabaseConfigured } from "@/lib/db/supabase";
 
 export async function POST(req: NextRequest) {
@@ -30,7 +31,14 @@ export async function POST(req: NextRequest) {
     const session = event.data.object as Stripe.Checkout.Session;
     const invoiceId = session.metadata?.invoice_id;
     if (invoiceId) {
-      await getSupabaseAdmin()
+      const supabase = getSupabaseAdmin();
+      const { data: invoice } = await supabase
+        .from("invoices")
+        .select("id, invoice_number")
+        .eq("id", invoiceId)
+        .maybeSingle();
+
+      await supabase
         .from("invoices")
         .update({
           status: "paid",
@@ -42,6 +50,16 @@ export async function POST(req: NextRequest) {
               : session.payment_intent?.id ?? null,
         })
         .eq("id", invoiceId);
+
+      await recordAuditLog({
+        action: "invoice.paid",
+        actor: null,
+        targetType: "invoice",
+        targetId: invoiceId,
+        targetLabel: invoice?.invoice_number ?? invoiceId,
+        summary: `Invoice ${invoice?.invoice_number ?? invoiceId} marked paid via Stripe`,
+        metadata: { stripeSessionId: session.id },
+      });
     }
   }
 

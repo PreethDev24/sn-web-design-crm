@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { headers } from "next/headers";
 import Stripe from "stripe";
 import { requireClient, requireInvoiceAccess, requireContractAccess, requireStaff } from "@/lib/auth/roles";
+import { recordAuditLog } from "@/lib/audit/log";
 import { getSupabaseAdmin, isSupabaseConfigured } from "@/lib/db/supabase";
 import { isDemoMode, isStripeConfigured } from "@/lib/demo/mode";
 import { mutateStore, newId, touch } from "@/lib/demo/store";
@@ -105,22 +106,36 @@ export async function createContract(formData: FormData) {
 }
 
 export async function sendContract(contractId: string) {
-  await requireContractAccess();
+  const user = await requireContractAccess();
 
   if (isDemoMode()) {
-    mutateStore((store) => {
+    const title = mutateStore((store) => {
       const c = store.contracts.find((x) => x.id === contractId);
       if (!c) throw new Error("Contract not found");
       c.status = "sent";
       c.sent_at = touch();
       c.updated_at = touch();
+      return c.title;
     });
     revalidatePath("/crm/contracts");
     revalidatePath("/portal/contracts");
+    await recordAuditLog({
+      action: "contract.sent",
+      actor: user,
+      targetType: "contract",
+      targetId: contractId,
+      targetLabel: title,
+      summary: `Sent contract ${title}`,
+    });
     return;
   }
 
   const supabase = requireDb();
+  const { data: contract } = await supabase
+    .from("contracts")
+    .select("id, title")
+    .eq("id", contractId)
+    .maybeSingle();
   const { error } = await supabase
     .from("contracts")
     .update({ status: "sent", sent_at: new Date().toISOString() })
@@ -128,14 +143,22 @@ export async function sendContract(contractId: string) {
   if (error) throw new Error(error.message);
   revalidatePath("/crm/contracts");
   revalidatePath("/portal/contracts");
+  await recordAuditLog({
+    action: "contract.sent",
+    actor: user,
+    targetType: "contract",
+    targetId: contractId,
+    targetLabel: contract?.title ?? contractId,
+    summary: `Sent contract ${contract?.title ?? contractId}`,
+  });
 }
 
 export async function signContract(contractId: string, signatureData: string) {
-  await requireClient();
+  const clientUser = await requireClient();
   const hdrs = await headers();
 
   if (isDemoMode()) {
-    mutateStore((store) => {
+    const title = mutateStore((store) => {
       const c = store.contracts.find((x) => x.id === contractId);
       if (!c) throw new Error("Contract not found");
       c.status = "signed";
@@ -144,10 +167,19 @@ export async function signContract(contractId: string, signatureData: string) {
       c.signer_ip = hdrs.get("x-forwarded-for") || "127.0.0.1";
       c.signer_user_agent = hdrs.get("user-agent");
       c.updated_at = touch();
+      return c.title;
     });
     revalidatePath("/portal/contracts");
     revalidatePath(`/portal/contracts/${contractId}`);
     revalidatePath("/crm/contracts");
+    await recordAuditLog({
+      action: "contract.signed",
+      actor: clientUser,
+      targetType: "contract",
+      targetId: contractId,
+      targetLabel: title,
+      summary: `Contract ${title} signed by ${clientUser.email}`,
+    });
     return;
   }
 
@@ -173,6 +205,14 @@ export async function signContract(contractId: string, signatureData: string) {
   revalidatePath("/portal/contracts");
   revalidatePath(`/portal/contracts/${contractId}`);
   revalidatePath("/crm/contracts");
+  await recordAuditLog({
+    action: "contract.signed",
+    actor: clientUser,
+    targetType: "contract",
+    targetId: contractId,
+    targetLabel: contract.title,
+    summary: `Contract ${contract.title} signed by ${clientUser.email}`,
+  });
 }
 
 export async function createInvoice(formData: FormData) {
@@ -202,6 +242,17 @@ export async function createInvoice(formData: FormData) {
       store.invoices.push(invoice);
     });
     revalidatePath("/crm/invoices");
+    await recordAuditLog({
+      action: "invoice.created",
+      actor: user,
+      targetType: "invoice",
+      targetLabel: invoiceNumber,
+      summary: `Created invoice ${invoiceNumber}`,
+      metadata: {
+        title: String(formData.get("title") || "").trim(),
+        amount: Number(formData.get("amount") || 0),
+      },
+    });
     return;
   }
 
@@ -220,24 +271,49 @@ export async function createInvoice(formData: FormData) {
   });
   if (error) throw new Error(error.message);
   revalidatePath("/crm/invoices");
+  await recordAuditLog({
+    action: "invoice.created",
+    actor: user,
+    targetType: "invoice",
+    targetLabel: invoiceNumber,
+    summary: `Created invoice ${invoiceNumber}`,
+    metadata: {
+      title: String(formData.get("title") || "").trim(),
+      amount: Number(formData.get("amount") || 0),
+    },
+  });
 }
 
 export async function sendInvoice(invoiceId: string) {
-  await requireInvoiceAccess();
+  const user = await requireInvoiceAccess();
 
   if (isDemoMode()) {
-    mutateStore((store) => {
+    const label = mutateStore((store) => {
       const inv = store.invoices.find((i) => i.id === invoiceId);
       if (!inv) throw new Error("Invoice not found");
       inv.status = "sent";
       inv.updated_at = touch();
+      return inv.invoice_number;
     });
     revalidatePath("/crm/invoices");
     revalidatePath("/portal/invoices");
+    await recordAuditLog({
+      action: "invoice.sent",
+      actor: user,
+      targetType: "invoice",
+      targetId: invoiceId,
+      targetLabel: label,
+      summary: `Sent invoice ${label}`,
+    });
     return;
   }
 
   const supabase = requireDb();
+  const { data: inv } = await supabase
+    .from("invoices")
+    .select("id, invoice_number")
+    .eq("id", invoiceId)
+    .maybeSingle();
   const { error } = await supabase
     .from("invoices")
     .update({ status: "sent" })
@@ -245,6 +321,14 @@ export async function sendInvoice(invoiceId: string) {
   if (error) throw new Error(error.message);
   revalidatePath("/crm/invoices");
   revalidatePath("/portal/invoices");
+  await recordAuditLog({
+    action: "invoice.sent",
+    actor: user,
+    targetType: "invoice",
+    targetId: invoiceId,
+    targetLabel: inv?.invoice_number ?? invoiceId,
+    summary: `Sent invoice ${inv?.invoice_number ?? invoiceId}`,
+  });
 }
 
 export async function createCheckoutSession(invoiceId: string) {
