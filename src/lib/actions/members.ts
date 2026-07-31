@@ -2,21 +2,28 @@
 
 import { requireOwner } from "@/lib/auth/roles";
 import { recordAuditLog } from "@/lib/audit/log";
-import { getSupabaseAdmin, isSupabaseConfigured } from "@/lib/db/supabase";
+import {
+  isDataConfigured,
+  getDocument,
+  deleteDocument,
+  deleteDocuments,
+  updateDocuments,
+  COLLECTIONS,
+} from "@/lib/db/repo";
 import { isDemoMode } from "@/lib/demo/mode";
 import { mutateStore } from "@/lib/demo/store";
+import type { DbUser } from "@/lib/types";
 import { clerkClient } from "@clerk/nextjs/server";
 import { revalidatePath } from "next/cache";
 
-function requireDb() {
-  if (!isSupabaseConfigured()) {
-    throw new Error("Supabase is not configured. Add credentials to .env.local");
+function assertDbReady() {
+  if (!isDataConfigured()) {
+    throw new Error("Database is not configured. Add credentials to .env.local");
   }
-  return getSupabaseAdmin();
 }
 
 /**
- * Permanently remove a sales rep or client from Clerk + Supabase.
+ * Permanently remove a sales rep or client from Clerk + the database.
  * Owners cannot remove themselves or other owners.
  */
 export async function removePortalMember(userId: string) {
@@ -53,13 +60,8 @@ export async function removePortalMember(userId: string) {
     return;
   }
 
-  const supabase = requireDb();
-  const { data: target, error: fetchError } = await supabase
-    .from("users")
-    .select("*")
-    .eq("id", userId)
-    .maybeSingle();
-  if (fetchError) throw new Error(fetchError.message);
+  assertDbReady();
+  const target = await getDocument(COLLECTIONS.users, userId) as unknown as (DbUser & { clerk_id?: string }) | null;
   if (!target) throw new Error("User not found");
   if (target.role !== "sales" && target.role !== "client") {
     throw new Error("Only sales reps and clients can be removed this way");
@@ -99,11 +101,9 @@ export async function removePortalMember(userId: string) {
     }
   }
 
-  await supabase.from("clients").update({ primary_user_id: null }).eq("primary_user_id", userId);
-  await supabase.from("sales_profiles").delete().eq("user_id", userId);
-
-  const { error: deleteError } = await supabase.from("users").delete().eq("id", userId);
-  if (deleteError) throw new Error(deleteError.message);
+  await updateDocuments(COLLECTIONS.clients, { primary_user_id: userId }, { primary_user_id: null });
+  await deleteDocuments(COLLECTIONS.sales_profiles, { user_id: userId });
+  await deleteDocument(COLLECTIONS.users, userId);
 
   revalidatePath("/crm/team");
   revalidatePath("/crm/contacts");

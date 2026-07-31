@@ -31,10 +31,8 @@ export default async function PortalMessagesPage({
           <p className="font-medium">One-time database setup required</p>
           <p className="mt-1">
             Run{" "}
-            <code className="rounded bg-amber-100 px-1">supabase/migrations/006_chat.sql</code>
-            {" "}and{" "}
-            <code className="rounded bg-amber-100 px-1">007_chat_typing_ping.sql</code>{" "}
-            in the Supabase SQL Editor, then refresh this page.
+            <code className="rounded bg-amber-100 px-1">npm run appwrite:setup</code>{" "}
+            to create chat collections, then refresh this page.
           </p>
         </div>
       )}

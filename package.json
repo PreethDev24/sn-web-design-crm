@@ -6,7 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "appwrite:setup": "node scripts/appwrite/setup-schema.mjs",
+    "appwrite:export": "node scripts/appwrite/export-supabase.mjs",
+    "appwrite:import": "node scripts/appwrite/import-appwrite.mjs"
   },
   "dependencies": {
     "@clerk/nextjs": "^7.5.20",
@@ -23,7 +26,6 @@
     "@radix-ui/react-separator": "^1.1.12",
     "@radix-ui/react-slot": "^1.3.0",
     "@radix-ui/react-tabs": "^1.1.18",
-    "@supabase/ssr": "^0.12.3",
     "@supabase/supabase-js": "^2.110.7",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -32,6 +34,7 @@
     "lucide-react": "^1.25.0",
     "nanoid": "^6.0.0",
     "next": "16.2.10",
+    "node-appwrite": "^27.1.0",
     "nodemailer": "^9.0.3",
     "react": "19.2.4",
     "react-dom": "19.2.4",

@@ -1,7 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { Webhook } from "svix";
 import { resolveInvitedRole } from "@/lib/auth/clerk-role";
-import { getSupabaseAdmin, isSupabaseConfigured } from "@/lib/db/supabase";
+import {
+  isDataConfigured,
+  findOneBy,
+  findByEmailIlike,
+  createDocument,
+  updateDocument,
+  updateDocuments,
+  deleteDocuments,
+  countDocuments,
+  COLLECTIONS,
+} from "@/lib/db/repo";
 import type { UserRole } from "@/lib/types";
 
 type ClerkWebhookEvent = {
@@ -17,8 +27,8 @@ type ClerkWebhookEvent = {
 };
 
 export async function POST(req: NextRequest) {
-  if (!isSupabaseConfigured()) {
-    return NextResponse.json({ error: "Supabase not configured" }, { status: 500 });
+  if (!isDataConfigured()) {
+    return NextResponse.json({ error: "Database not configured" }, { status: 500 });
   }
 
   const secret = process.env.CLERK_WEBHOOK_SECRET;
@@ -48,9 +58,8 @@ export async function POST(req: NextRequest) {
     event = JSON.parse(payload) as ClerkWebhookEvent;
   }
 
-  const supabase = getSupabaseAdmin();
-
   if (event.type === "user.created" || event.type === "user.updated") {
+    const now = new Date().toISOString();
     const email = event.data.email_addresses?.[0]?.email_address ?? "";
     let role = (event.data.public_metadata?.role as UserRole | undefined) ?? undefined;
     if (!role && email) {
@@ -61,86 +70,83 @@ export async function POST(req: NextRequest) {
       }
     }
     if (!role) {
-      const { count } = await supabase.from("users").select("*", { count: "exact", head: true });
+      const count = await countDocuments(COLLECTIONS.users);
       role = (count ?? 0) === 0 ? "owner" : "client";
     }
 
-    const { data: existing } = await supabase
-      .from("users")
-      .select("id, role")
-      .eq("clerk_id", event.data.id)
-      .maybeSingle();
+    const existing = await findOneBy(COLLECTIONS.users, {
+      clerk_id: event.data.id,
+    }) as unknown as ({ id: string; role: UserRole }) | null;
+
+    let dbUserId: string | null = null;
 
     if (existing) {
-      await supabase
-        .from("users")
-        .update({
+      await updateDocument(COLLECTIONS.users, existing.id, {
+        email,
+        first_name: event.data.first_name,
+        last_name: event.data.last_name,
+        avatar_url: event.data.image_url,
+        role,
+        updated_at: now,
+      });
+      dbUserId = existing.id;
+    } else if (email) {
+      const byEmail = await findByEmailIlike(
+        COLLECTIONS.users,
+        email
+      ) as unknown as ({ id: string; role: UserRole }) | null;
+
+      if (byEmail) {
+        await updateDocument(COLLECTIONS.users, byEmail.id, {
+          clerk_id: event.data.id,
           email,
           first_name: event.data.first_name,
           last_name: event.data.last_name,
           avatar_url: event.data.image_url,
-          role,
-        })
-        .eq("clerk_id", event.data.id);
-    } else if (email) {
-      const { data: byEmail } = await supabase
-        .from("users")
-        .select("id, role")
-        .ilike("email", email)
-        .maybeSingle();
-
-      if (byEmail) {
-        await supabase
-          .from("users")
-          .update({
-            clerk_id: event.data.id,
-            email,
-            first_name: event.data.first_name,
-            last_name: event.data.last_name,
-            avatar_url: event.data.image_url,
-            role: event.data.public_metadata?.role ?? byEmail.role,
-          })
-          .eq("id", byEmail.id);
+          role: event.data.public_metadata?.role ?? byEmail.role,
+          updated_at: now,
+        });
+        dbUserId = byEmail.id;
       } else {
-        await supabase.from("users").insert({
+        const created = await createDocument(COLLECTIONS.users, {
           clerk_id: event.data.id,
           email,
           first_name: event.data.first_name,
           last_name: event.data.last_name,
           avatar_url: event.data.image_url,
           role,
-        });
+          created_at: now,
+          updated_at: now,
+        }) as unknown as ({ id: string });
+        dbUserId = created.id;
       }
     } else {
-      await supabase.from("users").insert({
+      const created = await createDocument(COLLECTIONS.users, {
         clerk_id: event.data.id,
         email,
         first_name: event.data.first_name,
         last_name: event.data.last_name,
         avatar_url: event.data.image_url,
         role,
-      });
+        created_at: now,
+        updated_at: now,
+      }) as unknown as ({ id: string });
+      dbUserId = created.id;
     }
 
     // Link client user to client company by email
-    if (role === "client" && email) {
-      const { data: dbUser } = await supabase
-        .from("users")
-        .select("id")
-        .eq("clerk_id", event.data.id)
-        .single();
-      if (dbUser) {
-        await supabase
-          .from("clients")
-          .update({ primary_user_id: dbUser.id })
-          .eq("email", email)
-          .is("primary_user_id", null);
-      }
+    if (role === "client" && email && dbUserId) {
+      await updateDocuments(
+        COLLECTIONS.clients,
+        { email },
+        { primary_user_id: dbUserId },
+        { isNull: ["primary_user_id"] }
+      );
     }
   }
 
   if (event.type === "user.deleted") {
-    await supabase.from("users").delete().eq("clerk_id", event.data.id);
+    await deleteDocuments(COLLECTIONS.users, { clerk_id: event.data.id });
   }
 
   return NextResponse.json({ ok: true });

@@ -1,7 +1,15 @@
 import { auth, clerkClient, currentUser } from "@clerk/nextjs/server";
 import { redirect } from "next/navigation";
 import { resolveClerkRole, syncClerkUserRole } from "@/lib/auth/clerk-role";
-import { getSupabaseAdmin, isSupabaseConfigured } from "@/lib/db/supabase";
+import {
+  isDataConfigured,
+  findOneBy,
+  findByEmailIlike,
+  createDocument,
+  updateDocument,
+  countDocuments,
+  COLLECTIONS,
+} from "@/lib/db/repo";
 import { isDemoMode } from "@/lib/demo/mode";
 import {
   requireDemoAuth,
@@ -14,15 +22,9 @@ import type { DbUser, UserRole } from "@/lib/types";
 
 export { canAccessInvoices, canAccessContracts, isStaffRole };
 
-function formatSupabaseError(error: {
-  message?: string;
-  code?: string;
-  details?: string;
-  hint?: string;
-}) {
-  return [error.message, error.code && `(${error.code})`, error.details, error.hint]
-    .filter(Boolean)
-    .join(" ");
+function formatDbError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
 }
 
 export async function getOrCreateDbUser(): Promise<DbUser | null> {
@@ -33,7 +35,7 @@ export async function getOrCreateDbUser(): Promise<DbUser | null> {
   const user = await currentUser();
   if (!user) return null;
 
-  if (!isSupabaseConfigured()) {
+  if (!isDataConfigured()) {
     const role = (user.publicMetadata?.role as UserRole) || "owner";
     return {
       id: "local-dev-user",
@@ -50,7 +52,6 @@ export async function getOrCreateDbUser(): Promise<DbUser | null> {
     };
   }
 
-  const supabase = getSupabaseAdmin();
   const email =
     user.emailAddresses[0]?.emailAddress || `${user.id.replace(/[^a-zA-Z0-9]/g, "")}@users.local`;
 
@@ -62,79 +63,65 @@ export async function getOrCreateDbUser(): Promise<DbUser | null> {
     metaRole = user.publicMetadata?.role as UserRole | undefined;
   }
 
-  const { data: existing, error: lookupError } = await supabase
-    .from("users")
-    .select("*")
-    .eq("clerk_id", user.id)
-    .maybeSingle();
-
-  if (lookupError) {
-    console.error("Failed to lookup user:", formatSupabaseError(lookupError));
-    throw new Error(`User lookup failed: ${formatSupabaseError(lookupError)}`);
+  const now = new Date().toISOString();
+  let existing: DbUser | null;
+  try {
+    existing = await findOneBy(COLLECTIONS.users, { clerk_id: user.id }) as unknown as (DbUser) | null;
+  } catch (e) {
+    console.error("Failed to lookup user:", formatDbError(e));
+    throw new Error(`User lookup failed: ${formatDbError(e)}`);
   }
 
   if (existing) {
     const nextRole = metaRole ?? existing.role;
-    const { data: updated, error: updateError } = await supabase
-      .from("users")
-      .update({
+    try {
+      const updated = await updateDocument(COLLECTIONS.users, existing.id, {
         role: nextRole,
         email,
         first_name: user.firstName,
         last_name: user.lastName,
         avatar_url: user.imageUrl,
-      })
-      .eq("id", existing.id)
-      .select("*")
-      .single();
+        updated_at: now,
+      }) as unknown as (DbUser);
 
-    if (updateError) {
-      console.error("Failed to update user:", formatSupabaseError(updateError));
-      return existing as DbUser;
-    }
-
-    if (metaRole && metaRole !== existing.role) {
-      try {
-        await syncClerkUserRole(user.id, metaRole);
-      } catch (e) {
-        console.warn("Could not sync Clerk publicMetadata.role:", e);
+      if (metaRole && metaRole !== existing.role) {
+        try {
+          await syncClerkUserRole(user.id, metaRole);
+        } catch (e) {
+          console.warn("Could not sync Clerk publicMetadata.role:", e);
+        }
       }
-    }
 
-    return (updated ?? existing) as DbUser;
+      return updated;
+    } catch (e) {
+      console.error("Failed to update user:", formatDbError(e));
+      return existing;
+    }
   }
 
-  // Re-link existing Supabase user after Clerk project migration (same email, new clerk_id)
-  const { data: byEmail } = await supabase
-    .from("users")
-    .select("*")
-    .ilike("email", email)
-    .maybeSingle();
+  // Re-link existing user after Clerk project migration (same email, new clerk_id)
+  const byEmail = await findByEmailIlike(COLLECTIONS.users, email) as unknown as (DbUser) | null;
 
   if (byEmail) {
     const nextRole = metaRole ?? byEmail.role;
-    const { data: relinked, error: relinkError } = await supabase
-      .from("users")
-      .update({
+    try {
+      const relinked = await updateDocument(COLLECTIONS.users, byEmail.id, {
         clerk_id: user.id,
         role: nextRole,
         email,
         first_name: user.firstName,
         last_name: user.lastName,
         avatar_url: user.imageUrl,
-      })
-      .eq("id", byEmail.id)
-      .select("*")
-      .single();
-
-    if (relinkError) {
-      console.error("Failed to relink user:", formatSupabaseError(relinkError));
-      return byEmail as DbUser;
+        updated_at: now,
+      }) as unknown as (DbUser);
+      return relinked;
+    } catch (e) {
+      console.error("Failed to relink user:", formatDbError(e));
+      return byEmail;
     }
-    return (relinked ?? byEmail) as DbUser;
   }
 
-  const { count } = await supabase.from("users").select("*", { count: "exact", head: true });
+  const count = await countDocuments(COLLECTIONS.users);
   const role: UserRole = metaRole ?? ((count ?? 0) === 0 ? "owner" : "client");
 
   if (!metaRole && role === "owner") {
@@ -148,33 +135,26 @@ export async function getOrCreateDbUser(): Promise<DbUser | null> {
     }
   }
 
-  const { data: created, error } = await supabase
-    .from("users")
-    .insert({
+  try {
+    const created = await createDocument(COLLECTIONS.users, {
       clerk_id: user.id,
       email,
       first_name: user.firstName,
       last_name: user.lastName,
       role,
       avatar_url: user.imageUrl,
-    })
-    .select("*")
-    .single();
-
-  if (error) {
+      created_at: now,
+      updated_at: now,
+    }) as unknown as (DbUser);
+    return created;
+  } catch (error) {
     // Race: another request created the row — fetch it
-    const { data: raced } = await supabase
-      .from("users")
-      .select("*")
-      .eq("clerk_id", user.id)
-      .maybeSingle();
-    if (raced) return raced as DbUser;
+    const raced = await findOneBy(COLLECTIONS.users, { clerk_id: user.id }) as unknown as (DbUser) | null;
+    if (raced) return raced;
 
-    console.error("Failed to create user:", formatSupabaseError(error), error);
-    throw new Error(`Failed to create user: ${formatSupabaseError(error)}`);
+    console.error("Failed to create user:", formatDbError(error), error);
+    throw new Error(`Failed to create user: ${formatDbError(error)}`);
   }
-
-  return created as DbUser;
 }
 
 export async function requireAuth() {

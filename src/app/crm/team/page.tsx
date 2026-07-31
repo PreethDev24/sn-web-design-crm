@@ -49,19 +49,10 @@ export default async function TeamPage() {
           <p className="font-medium">One-time database setup required</p>
           <p className="mt-1">
             Run{" "}
-            <code className="rounded bg-amber-100 px-1">
-              supabase/migrations/003_client_invite_requests.sql
-            </code>{" "}
-            in the{" "}
-            <a
-              href="https://supabase.com/dashboard/project/fbnglqpbdmqgogiseblk/sql/new"
-              target="_blank"
-              rel="noreferrer"
-              className="font-medium underline"
-            >
-              Supabase SQL Editor
-            </a>
-            , then refresh this page.
+            <code className="rounded bg-amber-100 px-1">npm run appwrite:setup</code>{" "}
+            (see{" "}
+            <code className="rounded bg-amber-100 px-1">scripts/appwrite/README.md</code>
+            ), then refresh this page.
           </p>
         </div>
       )}

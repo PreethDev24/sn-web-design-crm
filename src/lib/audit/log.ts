@@ -1,4 +1,4 @@
-import { getSupabaseAdmin, isSupabaseConfigured } from "@/lib/db/supabase";
+import { isDataConfigured, createDocument, COLLECTIONS } from "@/lib/db/repo";
 import { isDemoMode } from "@/lib/demo/mode";
 import { mutateStore, newId, touch } from "@/lib/demo/store";
 import type { AuditLog, DbUser } from "@/lib/types";
@@ -69,9 +69,9 @@ export async function recordAuditLog(input: {
       return;
     }
 
-    if (!isSupabaseConfigured()) return;
+    if (!isDataConfigured()) return;
 
-    const { error } = await getSupabaseAdmin().from("audit_logs").insert({
+    await createDocument(COLLECTIONS.audit_logs, {
       action: entry.action,
       actor_id: entry.actor_id,
       actor_email: entry.actor_email,
@@ -81,26 +81,19 @@ export async function recordAuditLog(input: {
       target_label: entry.target_label,
       summary: entry.summary,
       metadata: entry.metadata,
+      created_at: entry.created_at,
     });
-
-    if (error) {
-      // Table may be missing until migration 009 is applied
-      if (
-        error.code === "PGRST205" ||
-        error.message.includes("audit_logs") ||
-        error.message.includes("schema cache")
-      ) {
-        console.warn(
-          "audit_logs table missing — run supabase/migrations/009_audit_logs.sql"
-        );
-        return;
-      }
-      console.error("Failed to write audit log:", error.message);
-      return;
-    }
 
     revalidatePath("/crm/audit");
   } catch (error) {
-    console.error("Audit log error:", error);
+    const message = error instanceof Error ? error.message : String(error);
+    // Table/collection may be missing until the relevant migration is applied
+    if (/PGRST205|audit_logs|schema cache|not found|404|Could not find|does not exist/i.test(message)) {
+      console.warn(
+        "audit_logs table missing — run supabase/migrations/009_audit_logs.sql or create the Appwrite audit_logs collection"
+      );
+      return;
+    }
+    console.error("Failed to write audit log:", message);
   }
 }

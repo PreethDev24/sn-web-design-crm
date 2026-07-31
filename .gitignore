@@ -37,6 +37,10 @@ yarn-error.log*
 # local demo data
 .data/
 
+# Appwrite migration dumps (may contain PII)
+scripts/appwrite/data/
+!scripts/appwrite/data/.gitkeep
+
 # vercel
 .vercel
 

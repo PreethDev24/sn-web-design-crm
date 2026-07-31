@@ -4,20 +4,26 @@ import { revalidatePath } from "next/cache";
 import { requireClient, requireOwner, requireStaff } from "@/lib/auth/roles";
 import { recordAuditLog } from "@/lib/audit/log";
 import { canManageDeliverables, canManageProjects } from "@/lib/auth/roles-shared";
-import { getSupabaseAdmin, isSupabaseConfigured } from "@/lib/db/supabase";
+import {
+  isDataConfigured,
+  createDocument,
+  updateDocument,
+  getDocument,
+  uploadToBucket,
+  COLLECTIONS,
+} from "@/lib/db/repo";
 import { isDemoMode } from "@/lib/demo/mode";
 import { mutateStore, newId, touch } from "@/lib/demo/store";
-import type { Deliverable, DeliverableStatus, Feedback, ProjectStatus } from "@/lib/types";
+import type { Client, Deliverable, DeliverableStatus, Feedback, ProjectStatus } from "@/lib/types";
 import { nanoid } from "nanoid";
 import fs from "fs";
 import path from "path";
 import { allocateDemoProjectId, allocateProjectId } from "@/lib/projects/allocate-project-id";
 
-function requireDb() {
-  if (!isSupabaseConfigured()) {
-    throw new Error("Supabase is not configured. Add credentials to .env.local");
+function assertDbReady() {
+  if (!isDataConfigured()) {
+    throw new Error("Database is not configured. Add credentials to .env.local");
   }
-  return getSupabaseAdmin();
 }
 
 async function saveDemoFile(file: File, folder: string) {
@@ -65,24 +71,31 @@ export async function createProject(formData: FormData) {
     return;
   }
 
-  const supabase = requireDb();
+  assertDbReady();
+  const now = new Date().toISOString();
   const clientId = String(formData.get("client_id") || "");
-  const { data: client } = await supabase.from("clients").select("name").eq("id", clientId).single();
+  const client = await getDocument(COLLECTIONS.clients, clientId) as unknown as (Client) | null;
   if (!client) throw new Error("Client not found");
 
-  const projectId = await allocateProjectId(supabase, client.name);
-  const { error } = await supabase.from("projects").insert({
-    id: projectId,
-    name: String(formData.get("name") || "").trim(),
-    description: String(formData.get("description") || "").trim() || null,
-    client_id: clientId,
-    status: "discovery",
-    start_date: String(formData.get("start_date") || "") || null,
-    target_launch_date: String(formData.get("target_launch_date") || "") || null,
-    assigned_to: user.id === "local-dev-user" ? null : user.id,
-    created_by: user.id === "local-dev-user" ? null : user.id,
-  });
-  if (error) throw new Error(error.message);
+  const projectId = await allocateProjectId(client.name);
+  await createDocument(
+    COLLECTIONS.projects,
+    {
+      name: String(formData.get("name") || "").trim(),
+      description: String(formData.get("description") || "").trim() || null,
+      client_id: clientId,
+      status: "discovery",
+      progress: 0,
+      start_date: String(formData.get("start_date") || "") || null,
+      target_launch_date: String(formData.get("target_launch_date") || "") || null,
+      assigned_to: user.id === "local-dev-user" ? null : user.id,
+      deal_id: null,
+      created_by: user.id === "local-dev-user" ? null : user.id,
+      created_at: now,
+      updated_at: now,
+    },
+    projectId
+  );
   revalidatePath("/crm/projects");
 }
 
@@ -126,16 +139,12 @@ export async function updateProjectStatus(projectId: string, status: ProjectStat
     return;
   }
 
-  const supabase = requireDb();
-  const { data: project } = await supabase
-    .from("projects")
-    .select("id, name")
-    .eq("id", projectId)
-    .maybeSingle();
-  const update: Record<string, unknown> = { status };
+  assertDbReady();
+  const now = new Date().toISOString();
+  const project = await getDocument(COLLECTIONS.projects, projectId) as unknown as ({ id: string; name: string }) | null;
+  const update: Record<string, unknown> = { status, updated_at: now };
   if (progressMap[status] !== undefined) update.progress = progressMap[status];
-  const { error } = await supabase.from("projects").update(update).eq("id", projectId);
-  if (error) throw new Error(error.message);
+  await updateDocument(COLLECTIONS.projects, projectId, update);
   revalidatePath("/crm/projects");
   revalidatePath(`/crm/projects/${projectId}`);
   revalidatePath(`/portal/projects/${projectId}`);
@@ -190,28 +199,26 @@ export async function terminateProject(projectId: string) {
     return;
   }
 
-  const supabase = requireDb();
-  const { data: project, error: fetchError } = await supabase
-    .from("projects")
-    .select("id, status, client_id, name")
-    .eq("id", projectId)
-    .maybeSingle();
-  if (fetchError) throw new Error(fetchError.message);
+  assertDbReady();
+  const now = new Date().toISOString();
+  const project = await getDocument(
+    COLLECTIONS.projects,
+    projectId
+  ) as unknown as ({ id: string; status: string; client_id: string; name: string }) | null;
   if (!project) throw new Error("Project not found");
   if (project.status === "terminated") throw new Error("Project is already terminated");
 
-  const { error } = await supabase
-    .from("projects")
-    .update({ status: "terminated" })
-    .eq("id", projectId);
-  if (error) throw new Error(error.message);
+  await updateDocument(COLLECTIONS.projects, projectId, { status: "terminated", updated_at: now });
 
-  await supabase.from("activities").insert({
+  await createDocument(COLLECTIONS.activities, {
     type: "system",
     body: "Project terminated by owner",
+    lead_id: null,
+    deal_id: null,
     client_id: project.client_id,
     project_id: projectId,
     author_id: null,
+    created_at: now,
   });
 
   revalidatePath("/crm/projects");
@@ -274,27 +281,27 @@ export async function createDeliverable(formData: FormData) {
     return;
   }
 
-  const supabase = requireDb();
+  assertDbReady();
+  const now = new Date().toISOString();
   if (file && file.size > 0) {
     const ext = file.name.split(".").pop() || "bin";
     const storagePath = `${projectId}/${nanoid()}.${ext}`;
-    const buffer = Buffer.from(await file.arrayBuffer());
-    const { error: uploadError } = await supabase.storage
-      .from("deliverables")
-      .upload(storagePath, buffer, { contentType: file.type, upsert: false });
-    if (uploadError) {
+    try {
+      const uploaded = await uploadToBucket("deliverables", storagePath, file, file.name);
+      fileUrl = uploaded.publicUrl;
+      fileName = file.name;
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
       throw new Error(
-        `Upload failed: ${uploadError.message}. Create a Storage bucket named "deliverables".`
+        `Upload failed: ${message}. Create a storage bucket named "deliverables".`
       );
     }
-    fileUrl = supabase.storage.from("deliverables").getPublicUrl(storagePath).data.publicUrl;
-    fileName = file.name;
   } else {
     fileUrl = String(formData.get("file_url") || "").trim() || null;
     fileName = String(formData.get("file_name") || "").trim() || null;
   }
 
-  const { error } = await supabase.from("deliverables").insert({
+  await createDocument(COLLECTIONS.deliverables, {
     project_id: projectId,
     title: String(formData.get("title") || "").trim(),
     description: String(formData.get("description") || "").trim() || null,
@@ -304,8 +311,10 @@ export async function createDeliverable(formData: FormData) {
     status: "in_review",
     version: Number(formData.get("version") || 1),
     uploaded_by: user.id === "local-dev-user" ? null : user.id,
+    approved_at: null,
+    created_at: now,
+    updated_at: now,
   });
-  if (error) throw new Error(error.message);
   revalidatePath(`/crm/projects/${projectId}`);
   revalidatePath(`/portal/projects/${projectId}`);
 }
@@ -340,16 +349,20 @@ export async function updateDeliverableStatus(
     return;
   }
 
-  const supabase = requireDb();
-  const update: Record<string, unknown> = { status };
-  if (status === "approved") update.approved_at = new Date().toISOString();
-  const { error } = await supabase.from("deliverables").update(update).eq("id", deliverableId);
-  if (error) throw new Error(error.message);
-  await supabase.from("activities").insert({
+  assertDbReady();
+  const now = new Date().toISOString();
+  const update: Record<string, unknown> = { status, updated_at: now };
+  if (status === "approved") update.approved_at = now;
+  await updateDocument(COLLECTIONS.deliverables, deliverableId, update);
+  await createDocument(COLLECTIONS.activities, {
     type: "status_change",
     body: `Deliverable marked ${status}`,
+    lead_id: null,
+    deal_id: null,
+    client_id: null,
     project_id: projectId,
     author_id: authorId === "local-dev-user" ? null : authorId,
+    created_at: now,
   });
   revalidatePath(`/crm/projects/${projectId}`);
   revalidatePath(`/portal/projects/${projectId}`);
@@ -387,18 +400,20 @@ export async function addFeedback(formData: FormData) {
     return;
   }
 
-  const supabase = requireDb();
-  const { error } = await supabase.from("feedback").insert({
+  assertDbReady();
+  const now = new Date().toISOString();
+  await createDocument(COLLECTIONS.feedback, {
     deliverable_id: deliverableId,
     author_id: user.id,
     comment,
+    resolved: false,
+    created_at: now,
   });
-  if (error) throw new Error(error.message);
   if (requestChanges) {
-    await supabase
-      .from("deliverables")
-      .update({ status: "changes_requested" })
-      .eq("id", deliverableId);
+    await updateDocument(COLLECTIONS.deliverables, deliverableId, {
+      status: "changes_requested",
+      updated_at: now,
+    });
   }
   revalidatePath(`/portal/projects/${projectId}`);
   revalidatePath(`/crm/projects/${projectId}`);

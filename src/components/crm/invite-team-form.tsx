@@ -29,7 +29,7 @@ export function InviteTeamForm() {
         startTransition(async () => {
           try {
             await inviteTeamMember(fd);
-            toast.success("Invitation sent");
+            toast.success("Invitation sent — ask them to check inbox and spam");
             router.refresh();
           } catch (e) {
             toast.error(e instanceof Error ? e.message : "Failed");

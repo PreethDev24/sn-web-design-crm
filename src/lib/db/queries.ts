@@ -1,4 +1,12 @@
-import { getSupabaseAdmin, isSupabaseConfigured } from "@/lib/db/supabase";
+import {
+  isDataConfigured,
+  listDocuments,
+  getDocument,
+  findOneBy,
+  collectionReady,
+  parseJsonField,
+  COLLECTIONS,
+} from "@/lib/db/repo";
 import { isDemoMode } from "@/lib/demo/mode";
 import { readStore } from "@/lib/demo/store";
 import { canAccessInvoices } from "@/lib/auth/roles-shared";
@@ -31,11 +39,28 @@ function emptyResult<T>(): T[] {
   return [];
 }
 
+function uniqueIds(values: (string | null | undefined)[]): string[] {
+  return [...new Set(values.filter((v): v is string => Boolean(v)))];
+}
+
+async function usersById(ids: string[]): Promise<DbUser[]> {
+  if (!ids.length) return [];
+  return listDocuments(COLLECTIONS.users, { equalAny: { id: ids } }) as unknown as (DbUser)[];
+}
+
 function withOwner(lead: Lead, users: DbUser[]): Lead {
   return { ...lead, owner: users.find((u) => u.id === lead.owner_id) ?? null };
 }
 
-function withDealRels(deal: Deal, store: ReturnType<typeof readStore>): Deal {
+function withDealRels(deal: Deal, users: DbUser[], leads: Lead[]): Deal {
+  return {
+    ...deal,
+    owner: users.find((u) => u.id === deal.owner_id) ?? null,
+    lead: leads.find((l) => l.id === deal.lead_id) ?? null,
+  };
+}
+
+function withDealRelsDemo(deal: Deal, store: ReturnType<typeof readStore>): Deal {
   return {
     ...deal,
     owner: store.users.find((u) => u.id === deal.owner_id) ?? null,
@@ -48,7 +73,11 @@ function withProjectClient(project: Project, clients: Client[]): Project {
 }
 
 function withContractClient(contract: Contract, clients: Client[]): Contract {
-  return { ...contract, client: clients.find((c) => c.id === contract.client_id) ?? null };
+  return {
+    ...contract,
+    signature_data: parseJsonField(contract.signature_data, null),
+    client: clients.find((c) => c.id === contract.client_id) ?? null,
+  };
 }
 
 function withInvoiceClient(invoice: Invoice, clients: Client[]): Invoice {
@@ -70,14 +99,13 @@ export async function listLeads(_viewer: DbUser): Promise<Lead[]> {
     const leads = store.leads.map((l) => withOwner(l, store.users));
     return leads.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   }
-  if (!isSupabaseConfigured()) return emptyResult();
-  const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase
-    .from("leads")
-    .select("*, owner:users!owner_id(*)")
-    .order("updated_at", { ascending: false });
-  if (error) throw new Error(error.message);
-  return (data ?? []) as Lead[];
+  if (!isDataConfigured()) return emptyResult();
+  const leads = await listDocuments(COLLECTIONS.leads, {
+    orderAttr: "updated_at",
+    orderAsc: false,
+  }) as unknown as (Lead)[];
+  const owners = await usersById(uniqueIds(leads.map((l) => l.owner_id)));
+  return leads.map((l) => withOwner(l, owners));
 }
 
 export async function getLead(id: string, _viewer: DbUser): Promise<Lead | null> {
@@ -87,30 +115,33 @@ export async function getLead(id: string, _viewer: DbUser): Promise<Lead | null>
     if (!lead) return null;
     return withOwner(lead, store.users);
   }
-  if (!isSupabaseConfigured()) return null;
-  const supabase = getSupabaseAdmin();
-  const { data } = await supabase
-    .from("leads")
-    .select("*, owner:users!owner_id(*)")
-    .eq("id", id)
-    .maybeSingle();
-  return data as Lead | null;
+  if (!isDataConfigured()) return null;
+  const lead = await getDocument(COLLECTIONS.leads, id) as unknown as (Lead) | null;
+  if (!lead) return null;
+  const owner = lead.owner_id ? await getDocument(COLLECTIONS.users, lead.owner_id) as unknown as (DbUser) | null : null;
+  return { ...lead, owner };
 }
 
 export async function listDeals(viewer: DbUser): Promise<Deal[]> {
   if (isDemoMode()) {
     const store = readStore();
-    const deals = store.deals.map((d) => withDealRels(d, store));
+    const deals = store.deals.map((d) => withDealRelsDemo(d, store));
     return deals.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   }
-  if (!isSupabaseConfigured()) return emptyResult();
-  const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase
-    .from("deals")
-    .select("*, owner:users!owner_id(*), lead:leads(*)")
-    .order("updated_at", { ascending: false });
-  if (error) throw new Error(error.message);
-  return (data ?? []) as Deal[];
+  if (!isDataConfigured()) return emptyResult();
+  const deals = await listDocuments(COLLECTIONS.deals, {
+    orderAttr: "updated_at",
+    orderAsc: false,
+  }) as unknown as (Deal)[];
+  const [owners, leads] = await Promise.all([
+    usersById(uniqueIds(deals.map((d) => d.owner_id))),
+    uniqueIds(deals.map((d) => d.lead_id)).length
+      ? listDocuments(COLLECTIONS.leads, {
+          equalAny: { id: uniqueIds(deals.map((d) => d.lead_id)) },
+        }) as unknown as (Lead)[]
+      : Promise.resolve([] as Lead[]),
+  ]);
+  return deals.map((d) => withDealRels(d, owners, leads));
 }
 
 export async function getDeal(id: string, _viewer: DbUser): Promise<Deal | null> {
@@ -118,16 +149,16 @@ export async function getDeal(id: string, _viewer: DbUser): Promise<Deal | null>
     const store = readStore();
     const deal = store.deals.find((d) => d.id === id);
     if (!deal) return null;
-    return withDealRels(deal, store);
+    return withDealRelsDemo(deal, store);
   }
-  if (!isSupabaseConfigured()) return null;
-  const supabase = getSupabaseAdmin();
-  const { data } = await supabase
-    .from("deals")
-    .select("*, owner:users!owner_id(*), lead:leads(*)")
-    .eq("id", id)
-    .maybeSingle();
-  return data as Deal | null;
+  if (!isDataConfigured()) return null;
+  const deal = await getDocument(COLLECTIONS.deals, id) as unknown as (Deal) | null;
+  if (!deal) return null;
+  const [owner, lead] = await Promise.all([
+    deal.owner_id ? getDocument(COLLECTIONS.users, deal.owner_id) as unknown as (DbUser) | null : Promise.resolve(null),
+    deal.lead_id ? getDocument(COLLECTIONS.leads, deal.lead_id) as unknown as (Lead) | null : Promise.resolve(null),
+  ]);
+  return { ...deal, owner, lead };
 }
 
 export async function listClients(_viewer: DbUser): Promise<Client[]> {
@@ -136,33 +167,27 @@ export async function listClients(_viewer: DbUser): Promise<Client[]> {
     const clients = [...store.clients];
     return clients.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   }
-  if (!isSupabaseConfigured()) return emptyResult();
-  const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase.from("clients").select("*").order("updated_at", { ascending: false });
-  if (error) throw new Error(error.message);
-  return (data ?? []) as Client[];
+  if (!isDataConfigured()) return emptyResult();
+  return listDocuments(COLLECTIONS.clients, {
+    orderAttr: "updated_at",
+    orderAsc: false,
+  }) as unknown as (Client)[];
 }
 
 export async function getClient(id: string): Promise<Client | null> {
   if (isDemoMode()) {
     return readStore().clients.find((c) => c.id === id) ?? null;
   }
-  if (!isSupabaseConfigured()) return null;
-  const { data } = await getSupabaseAdmin().from("clients").select("*").eq("id", id).maybeSingle();
-  return data as Client | null;
+  if (!isDataConfigured()) return null;
+  return getDocument(COLLECTIONS.clients, id) as unknown as (Client) | null;
 }
 
 export async function getClientForUser(userId: string): Promise<Client | null> {
   if (isDemoMode()) {
     return readStore().clients.find((c) => c.primary_user_id === userId) ?? null;
   }
-  if (!isSupabaseConfigured()) return null;
-  const { data } = await getSupabaseAdmin()
-    .from("clients")
-    .select("*")
-    .eq("primary_user_id", userId)
-    .maybeSingle();
-  return data as Client | null;
+  if (!isDataConfigured()) return null;
+  return findOneBy(COLLECTIONS.clients, { primary_user_id: userId }) as unknown as (Client) | null;
 }
 
 export async function listProjects(_viewer: DbUser): Promise<Project[]> {
@@ -171,14 +196,18 @@ export async function listProjects(_viewer: DbUser): Promise<Project[]> {
     const projects = store.projects.map((p) => withProjectClient(p, store.clients));
     return projects.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   }
-  if (!isSupabaseConfigured()) return emptyResult();
-  const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase
-    .from("projects")
-    .select("*, client:clients(*)")
-    .order("updated_at", { ascending: false });
-  if (error) throw new Error(error.message);
-  return (data ?? []) as Project[];
+  if (!isDataConfigured()) return emptyResult();
+  const projects = await listDocuments(COLLECTIONS.projects, {
+    orderAttr: "updated_at",
+    orderAsc: false,
+  }) as unknown as (Project)[];
+  const clients = await (async () => {
+    const ids = uniqueIds(projects.map((p) => p.client_id));
+    return ids.length
+      ? listDocuments(COLLECTIONS.clients, { equalAny: { id: ids } }) as unknown as (Client)[]
+      : [];
+  })();
+  return projects.map((p) => withProjectClient(p, clients));
 }
 
 export async function getProject(id: string): Promise<Project | null> {
@@ -188,13 +217,13 @@ export async function getProject(id: string): Promise<Project | null> {
     if (!project) return null;
     return withProjectClient(project, store.clients);
   }
-  if (!isSupabaseConfigured()) return null;
-  const { data } = await getSupabaseAdmin()
-    .from("projects")
-    .select("*, client:clients(*)")
-    .eq("id", id)
-    .maybeSingle();
-  return data as Project | null;
+  if (!isDataConfigured()) return null;
+  const project = await getDocument(COLLECTIONS.projects, id) as unknown as (Project) | null;
+  if (!project) return null;
+  const client = project.client_id
+    ? await getDocument(COLLECTIONS.clients, project.client_id) as unknown as (Client) | null
+    : null;
+  return { ...project, client };
 }
 
 export async function listProjectsForClient(clientId: string): Promise<Project[]> {
@@ -205,14 +234,14 @@ export async function listProjectsForClient(clientId: string): Promise<Project[]
       .map((p) => withProjectClient(p, store.clients))
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   }
-  if (!isSupabaseConfigured()) return emptyResult();
-  const { data, error } = await getSupabaseAdmin()
-    .from("projects")
-    .select("*, client:clients(*)")
-    .eq("client_id", clientId)
-    .order("updated_at", { ascending: false });
-  if (error) throw new Error(error.message);
-  return (data ?? []) as Project[];
+  if (!isDataConfigured()) return emptyResult();
+  const projects = await listDocuments(COLLECTIONS.projects, {
+    equal: { client_id: clientId },
+    orderAttr: "updated_at",
+    orderAsc: false,
+  }) as unknown as (Project)[];
+  const client = await getDocument(COLLECTIONS.clients, clientId) as unknown as (Client) | null;
+  return projects.map((p) => ({ ...p, client }));
 }
 
 export async function listDeliverables(projectId: string): Promise<Deliverable[]> {
@@ -221,27 +250,20 @@ export async function listDeliverables(projectId: string): Promise<Deliverable[]
       .deliverables.filter((d) => d.project_id === projectId)
       .sort((a, b) => b.created_at.localeCompare(a.created_at));
   }
-  if (!isSupabaseConfigured()) return emptyResult();
-  const { data, error } = await getSupabaseAdmin()
-    .from("deliverables")
-    .select("*")
-    .eq("project_id", projectId)
-    .order("created_at", { ascending: false });
-  if (error) throw new Error(error.message);
-  return (data ?? []) as Deliverable[];
+  if (!isDataConfigured()) return emptyResult();
+  return listDocuments(COLLECTIONS.deliverables, {
+    equal: { project_id: projectId },
+    orderAttr: "created_at",
+    orderAsc: false,
+  }) as unknown as (Deliverable)[];
 }
 
 export async function getDeliverable(id: string): Promise<Deliverable | null> {
   if (isDemoMode()) {
     return readStore().deliverables.find((d) => d.id === id) ?? null;
   }
-  if (!isSupabaseConfigured()) return null;
-  const { data } = await getSupabaseAdmin()
-    .from("deliverables")
-    .select("*")
-    .eq("id", id)
-    .maybeSingle();
-  return data as Deliverable | null;
+  if (!isDataConfigured()) return null;
+  return getDocument(COLLECTIONS.deliverables, id) as unknown as (Deliverable) | null;
 }
 
 export async function listFeedback(deliverableId: string): Promise<Feedback[]> {
@@ -252,14 +274,14 @@ export async function listFeedback(deliverableId: string): Promise<Feedback[]> {
       .map((f) => withFeedbackAuthor(f, store.users))
       .sort((a, b) => a.created_at.localeCompare(b.created_at));
   }
-  if (!isSupabaseConfigured()) return emptyResult();
-  const { data, error } = await getSupabaseAdmin()
-    .from("feedback")
-    .select("*, author:users!author_id(*)")
-    .eq("deliverable_id", deliverableId)
-    .order("created_at", { ascending: true });
-  if (error) throw new Error(error.message);
-  return (data ?? []) as Feedback[];
+  if (!isDataConfigured()) return emptyResult();
+  const feedback = await listDocuments(COLLECTIONS.feedback, {
+    equal: { deliverable_id: deliverableId },
+    orderAttr: "created_at",
+    orderAsc: true,
+  }) as unknown as (Feedback)[];
+  const authors = await usersById(uniqueIds(feedback.map((f) => f.author_id)));
+  return feedback.map((f) => withFeedbackAuthor(f, authors));
 }
 
 export async function listContracts(_viewer: DbUser): Promise<Contract[]> {
@@ -269,13 +291,18 @@ export async function listContracts(_viewer: DbUser): Promise<Contract[]> {
       .map((c) => withContractClient(c, store.clients))
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   }
-  if (!isSupabaseConfigured()) return emptyResult();
-  const { data, error } = await getSupabaseAdmin()
-    .from("contracts")
-    .select("*, client:clients(*)")
-    .order("updated_at", { ascending: false });
-  if (error) throw new Error(error.message);
-  return (data ?? []) as Contract[];
+  if (!isDataConfigured()) return emptyResult();
+  const contracts = await listDocuments(COLLECTIONS.contracts, {
+    orderAttr: "updated_at",
+    orderAsc: false,
+  }) as unknown as (Contract)[];
+  const clients = await usersOrClientsById(uniqueIds(contracts.map((c) => c.client_id)));
+  return contracts.map((c) => withContractClient(c, clients));
+}
+
+async function usersOrClientsById(ids: string[]): Promise<Client[]> {
+  if (!ids.length) return [];
+  return listDocuments(COLLECTIONS.clients, { equalAny: { id: ids } }) as unknown as (Client)[];
 }
 
 export async function listContractsForClient(clientId: string): Promise<Contract[]> {
@@ -286,14 +313,18 @@ export async function listContractsForClient(clientId: string): Promise<Contract
       .map((c) => withContractClient(c, store.clients))
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   }
-  if (!isSupabaseConfigured()) return emptyResult();
-  const { data, error } = await getSupabaseAdmin()
-    .from("contracts")
-    .select("*, client:clients(*)")
-    .eq("client_id", clientId)
-    .order("updated_at", { ascending: false });
-  if (error) throw new Error(error.message);
-  return (data ?? []) as Contract[];
+  if (!isDataConfigured()) return emptyResult();
+  const contracts = await listDocuments(COLLECTIONS.contracts, {
+    equal: { client_id: clientId },
+    orderAttr: "updated_at",
+    orderAsc: false,
+  }) as unknown as (Contract)[];
+  const client = await getDocument(COLLECTIONS.clients, clientId) as unknown as (Client) | null;
+  return contracts.map((c) => ({
+    ...c,
+    signature_data: parseJsonField(c.signature_data, null),
+    client,
+  }));
 }
 
 export async function getContract(id: string): Promise<Contract | null> {
@@ -303,13 +334,13 @@ export async function getContract(id: string): Promise<Contract | null> {
     if (!contract) return null;
     return withContractClient(contract, store.clients);
   }
-  if (!isSupabaseConfigured()) return null;
-  const { data } = await getSupabaseAdmin()
-    .from("contracts")
-    .select("*, client:clients(*)")
-    .eq("id", id)
-    .maybeSingle();
-  return data as Contract | null;
+  if (!isDataConfigured()) return null;
+  const contract = await getDocument(COLLECTIONS.contracts, id) as unknown as (Contract) | null;
+  if (!contract) return null;
+  const client = contract.client_id
+    ? await getDocument(COLLECTIONS.clients, contract.client_id) as unknown as (Client) | null
+    : null;
+  return { ...contract, signature_data: parseJsonField(contract.signature_data, null), client };
 }
 
 export async function listInvoices(_viewer: DbUser): Promise<Invoice[]> {
@@ -319,13 +350,13 @@ export async function listInvoices(_viewer: DbUser): Promise<Invoice[]> {
       .map((i) => withInvoiceClient(i, store.clients))
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   }
-  if (!isSupabaseConfigured()) return emptyResult();
-  const { data, error } = await getSupabaseAdmin()
-    .from("invoices")
-    .select("*, client:clients(*)")
-    .order("updated_at", { ascending: false });
-  if (error) throw new Error(error.message);
-  return (data ?? []) as Invoice[];
+  if (!isDataConfigured()) return emptyResult();
+  const invoices = await listDocuments(COLLECTIONS.invoices, {
+    orderAttr: "updated_at",
+    orderAsc: false,
+  }) as unknown as (Invoice)[];
+  const clients = await usersOrClientsById(uniqueIds(invoices.map((i) => i.client_id)));
+  return invoices.map((i) => withInvoiceClient(i, clients));
 }
 
 export async function listInvoicesForClient(clientId: string): Promise<Invoice[]> {
@@ -336,14 +367,14 @@ export async function listInvoicesForClient(clientId: string): Promise<Invoice[]
       .map((i) => withInvoiceClient(i, store.clients))
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   }
-  if (!isSupabaseConfigured()) return emptyResult();
-  const { data, error } = await getSupabaseAdmin()
-    .from("invoices")
-    .select("*, client:clients(*)")
-    .eq("client_id", clientId)
-    .order("updated_at", { ascending: false });
-  if (error) throw new Error(error.message);
-  return (data ?? []) as Invoice[];
+  if (!isDataConfigured()) return emptyResult();
+  const invoices = await listDocuments(COLLECTIONS.invoices, {
+    equal: { client_id: clientId },
+    orderAttr: "updated_at",
+    orderAsc: false,
+  }) as unknown as (Invoice)[];
+  const client = await getDocument(COLLECTIONS.clients, clientId) as unknown as (Client) | null;
+  return invoices.map((i) => ({ ...i, client }));
 }
 
 export async function getInvoice(id: string): Promise<Invoice | null> {
@@ -353,13 +384,13 @@ export async function getInvoice(id: string): Promise<Invoice | null> {
     if (!invoice) return null;
     return withInvoiceClient(invoice, store.clients);
   }
-  if (!isSupabaseConfigured()) return null;
-  const { data } = await getSupabaseAdmin()
-    .from("invoices")
-    .select("*, client:clients(*)")
-    .eq("id", id)
-    .maybeSingle();
-  return data as Invoice | null;
+  if (!isDataConfigured()) return null;
+  const invoice = await getDocument(COLLECTIONS.invoices, id) as unknown as (Invoice) | null;
+  if (!invoice) return null;
+  const client = invoice.client_id
+    ? await getDocument(COLLECTIONS.clients, invoice.client_id) as unknown as (Client) | null
+    : null;
+  return { ...invoice, client };
 }
 
 export async function listActivities(filters: {
@@ -384,19 +415,23 @@ export async function listActivities(filters: {
       .sort((a, b) => b.created_at.localeCompare(a.created_at))
       .slice(0, 50);
   }
-  if (!isSupabaseConfigured()) return emptyResult();
-  let query = getSupabaseAdmin()
-    .from("activities")
-    .select("*, author:users!author_id(*)")
-    .order("created_at", { ascending: false })
-    .limit(50);
-  if (filters.lead_id) query = query.eq("lead_id", filters.lead_id);
-  if (filters.deal_id) query = query.eq("deal_id", filters.deal_id);
-  if (filters.client_id) query = query.eq("client_id", filters.client_id);
-  if (filters.project_id) query = query.eq("project_id", filters.project_id);
-  const { data, error } = await query;
-  if (error) throw new Error(error.message);
-  return (data ?? []) as Activity[];
+  if (!isDataConfigured()) return emptyResult();
+  if (!filters.lead_id && !filters.deal_id && !filters.client_id && !filters.project_id) {
+    return emptyResult();
+  }
+  const equal: Record<string, string> = {};
+  if (filters.lead_id) equal.lead_id = filters.lead_id;
+  if (filters.deal_id) equal.deal_id = filters.deal_id;
+  if (filters.client_id) equal.client_id = filters.client_id;
+  if (filters.project_id) equal.project_id = filters.project_id;
+  const activities = await listDocuments(COLLECTIONS.activities, {
+    equal,
+    orderAttr: "created_at",
+    orderAsc: false,
+    limit: 50,
+  }) as unknown as (Activity)[];
+  const authors = await usersById(uniqueIds(activities.map((a) => a.author_id)));
+  return activities.map((a) => withActivityAuthor(a, authors));
 }
 
 export async function listTeamUsers(viewer?: DbUser): Promise<DbUser[]> {
@@ -404,16 +439,14 @@ export async function listTeamUsers(viewer?: DbUser): Promise<DbUser[]> {
 
   if (isDemoMode()) {
     users = [...readStore().users].sort((a, b) => b.created_at.localeCompare(a.created_at));
-  } else if (!isSupabaseConfigured()) {
+  } else if (!isDataConfigured()) {
     return emptyResult();
   } else {
-    const { data, error } = await getSupabaseAdmin()
-      .from("users")
-      .select("*")
-      .in("role", ["owner", "sales", "client"] satisfies UserRole[])
-      .order("created_at", { ascending: false });
-    if (error) throw new Error(error.message);
-    users = (data ?? []) as DbUser[];
+    users = await listDocuments(COLLECTIONS.users, {
+      equalAny: { role: ["owner", "sales", "client"] satisfies UserRole[] },
+      orderAttr: "created_at",
+      orderAsc: false,
+    }) as unknown as (DbUser)[];
   }
 
   // Sales reps must not see other sales (or themselves) — only owners and clients
@@ -448,27 +481,29 @@ export async function listClientInviteRequests(
       .map((r) => withInviteRels(r, store.users))
       .sort((a, b) => b.created_at.localeCompare(a.created_at));
   }
-  if (!isSupabaseConfigured()) return emptyResult();
-  let query = getSupabaseAdmin()
-    .from("client_invite_requests")
-    .select(
-      "*, requester:users!requested_by(*), reviewer:users!reviewed_by(*)"
-    )
-    .order("created_at", { ascending: false });
-  if (viewer.role === "sales") {
-    query = query.eq("requested_by", viewer.id);
-  }
-  const { data, error } = await query;
-  if (error) {
+  if (!isDataConfigured()) return emptyResult();
+  try {
+    const rows = await listDocuments(COLLECTIONS.client_invite_requests, {
+      equal: viewer.role === "sales" ? { requested_by: viewer.id } : undefined,
+      orderAttr: "created_at",
+      orderAsc: false,
+    }) as unknown as (ClientInviteRequest)[];
+    const userIds = uniqueIds([
+      ...rows.map((r) => r.requested_by),
+      ...rows.map((r) => r.reviewed_by),
+    ]);
+    const users = await usersById(userIds);
+    return rows.map((r) => withInviteRels(r, users));
+  } catch (e) {
+    const error = { message: e instanceof Error ? e.message : String(e) };
     if (isMissingClientInviteTable(error)) {
       console.warn(
-        "client_invite_requests table missing — run supabase/migrations/003_client_invite_requests.sql"
+        "client_invite_requests collection missing — run supabase/migrations/003_client_invite_requests.sql or create the Appwrite collection"
       );
       return emptyResult();
     }
-    throw new Error(error.message);
+    throw e;
   }
-  return (data ?? []) as ClientInviteRequest[];
 }
 
 export function isMissingClientInviteTable(error: {
@@ -479,18 +514,14 @@ export function isMissingClientInviteTable(error: {
   return (
     error.code === "PGRST205" ||
     message.includes("client_invite_requests") ||
-    message.includes("schema cache")
+    message.includes("schema cache") ||
+    /not found|404|Could not find|does not exist/i.test(message)
   );
 }
 
 export async function clientInviteRequestsReady(): Promise<boolean> {
   if (isDemoMode()) return true;
-  if (!isSupabaseConfigured()) return false;
-  const { error } = await getSupabaseAdmin()
-    .from("client_invite_requests")
-    .select("id")
-    .limit(1);
-  return !error || !isMissingClientInviteTable(error);
+  return collectionReady(COLLECTIONS.client_invite_requests);
 }
 
 export function isMissingSalesProfilesTable(error: {
@@ -501,7 +532,8 @@ export function isMissingSalesProfilesTable(error: {
   return (
     error.code === "PGRST205" ||
     message.includes("sales_profiles") ||
-    (message.includes("schema cache") && message.includes("sales_profiles"))
+    (message.includes("schema cache") && message.includes("sales_profiles")) ||
+    /not found|404|Could not find|does not exist/i.test(message)
   );
 }
 
@@ -509,17 +541,20 @@ export async function getSalesProfile(userId: string): Promise<SalesProfile | nu
   if (isDemoMode()) {
     return readStore().sales_profiles.find((p) => p.user_id === userId) ?? null;
   }
-  if (!isSupabaseConfigured()) return null;
-  const { data, error } = await getSupabaseAdmin()
-    .from("sales_profiles")
-    .select("*")
-    .eq("user_id", userId)
-    .maybeSingle();
-  if (error) {
+  if (!isDataConfigured()) return null;
+  try {
+    const byId = (await getDocument(COLLECTIONS.sales_profiles, userId)) as unknown as
+      | SalesProfile
+      | null;
+    if (byId) return { ...byId, user_id: byId.user_id ?? userId };
+    return (await findOneBy(COLLECTIONS.sales_profiles, {
+      user_id: userId,
+    })) as unknown as SalesProfile | null;
+  } catch (e) {
+    const error = { message: e instanceof Error ? e.message : String(e) };
     if (isMissingSalesProfilesTable(error)) return null;
-    throw new Error(error.message);
+    throw e;
   }
-  return data as SalesProfile | null;
 }
 
 export async function hasCompletedSalesOnboarding(user: DbUser): Promise<boolean> {
@@ -538,16 +573,19 @@ export async function listSalesProfiles(): Promise<SalesProfile[]> {
       }))
       .sort((a, b) => b.completed_at.localeCompare(a.completed_at));
   }
-  if (!isSupabaseConfigured()) return emptyResult();
-  const { data, error } = await getSupabaseAdmin()
-    .from("sales_profiles")
-    .select("*, user:users!user_id(*)")
-    .order("completed_at", { ascending: false });
-  if (error) {
+  if (!isDataConfigured()) return emptyResult();
+  try {
+    const profiles = await listDocuments(COLLECTIONS.sales_profiles, {
+      orderAttr: "completed_at",
+      orderAsc: false,
+    }) as unknown as (SalesProfile)[];
+    const users = await usersById(uniqueIds(profiles.map((p) => p.user_id)));
+    return profiles.map((p) => ({ ...p, user: users.find((u) => u.id === p.user_id) ?? null }));
+  } catch (e) {
+    const error = { message: e instanceof Error ? e.message : String(e) };
     if (isMissingSalesProfilesTable(error)) return emptyResult();
-    throw new Error(error.message);
+    throw e;
   }
-  return (data ?? []) as SalesProfile[];
 }
 
 export async function listContactsForViewer(viewer: DbUser): Promise<{
@@ -608,15 +646,14 @@ export function isMissingChatTables(error: {
     message.includes("conversations") ||
     message.includes("messages") ||
     (message.includes("schema cache") &&
-      (message.includes("conversations") || message.includes("messages")))
+      (message.includes("conversations") || message.includes("messages"))) ||
+    /not found|404|Could not find|does not exist/i.test(message)
   );
 }
 
 export async function chatTablesReady(): Promise<boolean> {
   if (isDemoMode()) return true;
-  if (!isSupabaseConfigured()) return false;
-  const { error } = await getSupabaseAdmin().from("conversations").select("id").limit(1);
-  return !error || !isMissingChatTables(error);
+  return collectionReady(COLLECTIONS.conversations);
 }
 
 export async function listChatPartners(viewer: DbUser): Promise<ChatPartnerOption[]> {
@@ -632,26 +669,17 @@ export async function listChatPartners(viewer: DbUser): Promise<ChatPartnerOptio
     users = store.users.filter((u) => u.id !== viewer.id && roles.includes(u.role));
     clients = store.clients;
     projects = store.projects;
-  } else if (!isSupabaseConfigured()) {
+  } else if (!isDataConfigured()) {
     return emptyResult();
   } else {
-    const supabase = getSupabaseAdmin();
-    const [usersRes, clientsRes, projectsRes] = await Promise.all([
-      supabase
-        .from("users")
-        .select("*")
-        .in("role", roles)
-        .neq("id", viewer.id)
-        .order("first_name", { ascending: true }),
-      supabase.from("clients").select("*"),
-      supabase.from("projects").select("*"),
+    [users, clients, projects] = await Promise.all([
+      listDocuments(COLLECTIONS.users, {
+        equalAny: { role: roles },
+        notEqual: { id: viewer.id },
+      }) as unknown as (DbUser)[],
+      listDocuments(COLLECTIONS.clients, {}) as unknown as (Client)[],
+      listDocuments(COLLECTIONS.projects, {}) as unknown as (Project)[],
     ]);
-    if (usersRes.error) throw new Error(usersRes.error.message);
-    if (clientsRes.error) throw new Error(clientsRes.error.message);
-    if (projectsRes.error) throw new Error(projectsRes.error.message);
-    users = (usersRes.data ?? []) as DbUser[];
-    clients = (clientsRes.data ?? []) as Client[];
-    projects = (projectsRes.data ?? []) as Project[];
   }
 
   return users
@@ -764,50 +792,56 @@ export async function listConversations(viewer: DbUser): Promise<Conversation[]>
       .map((c) => enrichConversation(c, viewer, store.users, store.messages))
       .sort((a, b) => b.last_message_at.localeCompare(a.last_message_at));
   }
-  if (!isSupabaseConfigured()) return emptyResult();
+  if (!isDataConfigured()) return emptyResult();
 
-  const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase
-    .from("conversations")
-    .select("*")
-    .or(`participant_one_id.eq.${viewer.id},participant_two_id.eq.${viewer.id}`)
-    .order("last_message_at", { ascending: false });
-
-  if (error) {
+  let rows: Conversation[];
+  try {
+    const [asOne, asTwo] = await Promise.all([
+      listDocuments(COLLECTIONS.conversations, {
+        equal: { participant_one_id: viewer.id },
+      }) as unknown as (Conversation)[],
+      listDocuments(COLLECTIONS.conversations, {
+        equal: { participant_two_id: viewer.id },
+      }) as unknown as (Conversation)[],
+    ]);
+    const byId = new Map<string, Conversation>();
+    for (const row of [...asOne, ...asTwo]) byId.set(row.id, row);
+    rows = [...byId.values()].sort((a, b) => b.last_message_at.localeCompare(a.last_message_at));
+  } catch (e) {
+    const error = { message: e instanceof Error ? e.message : String(e) };
     if (isMissingChatTables(error)) return emptyResult();
-    throw new Error(error.message);
+    throw e;
   }
 
-  const rows = (data ?? []) as Conversation[];
   if (!rows.length) return [];
 
-  const partnerIds = [
-    ...new Set(
-      rows.map((c) =>
-        c.participant_one_id === viewer.id ? c.participant_two_id : c.participant_one_id
-      )
-    ),
-  ];
+  const partnerIds = uniqueIds(
+    rows.map((c) =>
+      c.participant_one_id === viewer.id ? c.participant_two_id : c.participant_one_id
+    )
+  );
   const conversationIds = rows.map((c) => c.id);
 
-  const [{ data: partners }, { data: recentMsgs }, { data: unreadRows }] =
-    await Promise.all([
-      supabase.from("users").select("*").in("id", partnerIds),
-      supabase
-        .from("messages")
-        .select("*")
-        .in("conversation_id", conversationIds)
-        .order("created_at", { ascending: false }),
-      supabase
-        .from("messages")
-        .select("conversation_id")
-        .in("conversation_id", conversationIds)
-        .neq("sender_id", viewer.id)
-        .is("read_at", null),
-    ]);
+  const [users, allMessages, unreadMessages] = await Promise.all([
+    usersById(partnerIds),
+    conversationIds.length
+      ? listDocuments(COLLECTIONS.messages, {
+          equalAny: { conversation_id: conversationIds },
+          orderAttr: "created_at",
+          orderAsc: false,
+          limit: 2000,
+        }) as unknown as (Message)[]
+      : Promise.resolve([] as Message[]),
+    conversationIds.length
+      ? listDocuments(COLLECTIONS.messages, {
+          equalAny: { conversation_id: conversationIds },
+          notEqual: { sender_id: viewer.id },
+          isNull: ["read_at"],
+          limit: 2000,
+        }) as unknown as (Message)[]
+      : Promise.resolve([] as Message[]),
+  ]);
 
-  const users = (partners ?? []) as DbUser[];
-  const allMessages = (recentMsgs ?? []) as Message[];
   const lastByConv = new Map<string, Message>();
   for (const msg of allMessages) {
     if (!lastByConv.has(msg.conversation_id)) {
@@ -815,9 +849,8 @@ export async function listConversations(viewer: DbUser): Promise<Conversation[]>
     }
   }
   const unreadCount = new Map<string, number>();
-  for (const row of unreadRows ?? []) {
-    const id = (row as { conversation_id: string }).conversation_id;
-    unreadCount.set(id, (unreadCount.get(id) ?? 0) + 1);
+  for (const row of unreadMessages) {
+    unreadCount.set(row.conversation_id, (unreadCount.get(row.conversation_id) ?? 0) + 1);
   }
 
   return rows.map((c) => {
@@ -846,34 +879,28 @@ export async function getConversationForViewer(
     }
     return enrichConversation(row, viewer, store.users, store.messages);
   }
-  if (!isSupabaseConfigured()) return null;
+  if (!isDataConfigured()) return null;
 
-  const { data, error } = await getSupabaseAdmin()
-    .from("conversations")
-    .select("*")
-    .eq("id", conversationId)
-    .maybeSingle();
-  if (error) {
+  let row: Conversation | null;
+  try {
+    row = await getDocument(COLLECTIONS.conversations, conversationId) as unknown as (Conversation) | null;
+  } catch (e) {
+    const error = { message: e instanceof Error ? e.message : String(e) };
     if (isMissingChatTables(error)) return null;
-    throw new Error(error.message);
+    throw e;
   }
-  if (!data) return null;
-  const row = data as Conversation;
+  if (!row) return null;
   if (row.participant_one_id !== viewer.id && row.participant_two_id !== viewer.id) {
     return null;
   }
 
   const partnerId =
     row.participant_one_id === viewer.id ? row.participant_two_id : row.participant_one_id;
-  const { data: partner } = await getSupabaseAdmin()
-    .from("users")
-    .select("*")
-    .eq("id", partnerId)
-    .maybeSingle();
+  const partner = await getDocument(COLLECTIONS.users, partnerId) as unknown as (DbUser) | null;
 
   return {
     ...row,
-    partner: (partner as DbUser) ?? null,
+    partner: partner ?? null,
     partner_is_typing: isPartnerTyping(row, viewer.id),
   };
 }
@@ -912,18 +939,25 @@ export async function listMessages(
         sender: store.users.find((u) => u.id === m.sender_id) ?? null,
       }));
   }
-  if (!isSupabaseConfigured()) return emptyResult();
+  if (!isDataConfigured()) return emptyResult();
 
-  const { data, error } = await getSupabaseAdmin()
-    .from("messages")
-    .select("*, sender:users!sender_id(*)")
-    .eq("conversation_id", conversationId)
-    .order("created_at", { ascending: true });
-  if (error) {
+  let messages: Message[];
+  try {
+    messages = await listDocuments(COLLECTIONS.messages, {
+      equal: { conversation_id: conversationId },
+      orderAttr: "created_at",
+      orderAsc: true,
+    }) as unknown as (Message)[];
+  } catch (e) {
+    const error = { message: e instanceof Error ? e.message : String(e) };
     if (isMissingChatTables(error)) return emptyResult();
-    throw new Error(error.message);
+    throw e;
   }
-  return (data ?? []) as Message[];
+  const senders = await usersById(uniqueIds(messages.map((m) => m.sender_id)));
+  return messages.map((m) => ({
+    ...m,
+    sender: senders.find((u) => u.id === m.sender_id) ?? null,
+  }));
 }
 
 export function isMissingAuditLogsTable(error: {
@@ -934,15 +968,14 @@ export function isMissingAuditLogsTable(error: {
   return (
     error.code === "PGRST205" ||
     message.includes("audit_logs") ||
-    (message.includes("schema cache") && message.includes("audit_logs"))
+    (message.includes("schema cache") && message.includes("audit_logs")) ||
+    /not found|404|Could not find|does not exist/i.test(message)
   );
 }
 
 export async function auditLogsReady(): Promise<boolean> {
   if (isDemoMode()) return true;
-  if (!isSupabaseConfigured()) return false;
-  const { error } = await getSupabaseAdmin().from("audit_logs").select("id").limit(1);
-  return !error || !isMissingAuditLogsTable(error);
+  return collectionReady(COLLECTIONS.audit_logs);
 }
 
 export async function listAuditLogs(limit = 200): Promise<AuditLog[]> {
@@ -958,19 +991,26 @@ export async function listAuditLogs(limit = 200): Promise<AuditLog[]> {
           : null,
       }));
   }
-  if (!isSupabaseConfigured()) return emptyResult();
+  if (!isDataConfigured()) return emptyResult();
 
-  const { data, error } = await getSupabaseAdmin()
-    .from("audit_logs")
-    .select("*, actor:users!actor_id(*)")
-    .order("created_at", { ascending: false })
-    .limit(limit);
-
-  if (error) {
+  let rows: AuditLog[];
+  try {
+    rows = await listDocuments(COLLECTIONS.audit_logs, {
+      orderAttr: "created_at",
+      orderAsc: false,
+      limit,
+    }) as unknown as (AuditLog)[];
+  } catch (e) {
+    const error = { message: e instanceof Error ? e.message : String(e) };
     if (isMissingAuditLogsTable(error)) return emptyResult();
-    throw new Error(error.message);
+    throw e;
   }
-  return (data ?? []) as AuditLog[];
+  const actors = await usersById(uniqueIds(rows.map((r) => r.actor_id)));
+  return rows.map((row) => ({
+    ...row,
+    metadata: parseJsonField(row.metadata, {}),
+    actor: row.actor_id ? actors.find((u) => u.id === row.actor_id) ?? null : null,
+  }));
 }
 
 export { canChatRoles, orderedParticipantIds };

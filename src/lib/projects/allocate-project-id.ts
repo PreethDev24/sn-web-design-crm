@@ -1,16 +1,13 @@
-import type { SupabaseClient } from "@supabase/supabase-js";
+import { getDocument, COLLECTIONS } from "@/lib/db/repo";
 import { buildProjectId } from "@/lib/projects/id";
 
 const MAX_ATTEMPTS = 25;
 
-export async function allocateProjectId(
-  supabase: SupabaseClient,
-  companyName: string
-): Promise<string> {
+export async function allocateProjectId(companyName: string): Promise<string> {
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     const id = buildProjectId(companyName);
-    const { data } = await supabase.from("projects").select("id").eq("id", id).maybeSingle();
-    if (!data) return id;
+    const existing = await getDocument(COLLECTIONS.projects, id);
+    if (!existing) return id;
   }
   throw new Error("Could not generate a unique project ID. Try again.");
 }

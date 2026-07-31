@@ -2,7 +2,18 @@
 
 import { requireOwner, requireStaff } from "@/lib/auth/roles";
 import { recordAuditLog } from "@/lib/audit/log";
-import { getSupabaseAdmin, isSupabaseConfigured } from "@/lib/db/supabase";
+import {
+  isDataConfigured,
+  createDocument,
+  updateDocument,
+  updateDocuments,
+  deleteDocument,
+  deleteDocuments,
+  getDocument,
+  listDocuments,
+  findByEmailIlike,
+  COLLECTIONS,
+} from "@/lib/db/repo";
 import { isDemoMode } from "@/lib/demo/mode";
 import { ensureDemoInvite } from "@/lib/demo/auth";
 import { mutateStore, newId, touch } from "@/lib/demo/store";
@@ -15,19 +26,20 @@ import type {
   Activity,
   ActivityType,
   Client,
+  ClientInviteRequest,
   Deal,
   DealStage,
+  DbUser,
   Lead,
   LeadStatus,
   Project,
   UserRole,
 } from "@/lib/types";
 
-function requireDb() {
-  if (!isSupabaseConfigured()) {
-    throw new Error("Supabase is not configured. Add credentials to .env.local");
+function assertDbReady() {
+  if (!isDataConfigured()) {
+    throw new Error("Database is not configured. Add credentials to .env.local");
   }
-  return getSupabaseAdmin();
 }
 
 function authorId(userId: string) {
@@ -65,8 +77,9 @@ export async function createLead(formData: FormData) {
     return;
   }
 
-  const supabase = requireDb();
-  const { error } = await supabase.from("leads").insert({
+  assertDbReady();
+  const now = new Date().toISOString();
+  await createDocument(COLLECTIONS.leads, {
     first_name: String(formData.get("first_name") || "").trim(),
     last_name: String(formData.get("last_name") || "").trim() || null,
     email: String(formData.get("email") || "").trim() || null,
@@ -77,8 +90,10 @@ export async function createLead(formData: FormData) {
     notes: String(formData.get("notes") || "").trim() || null,
     status: "new",
     owner_id: authorId(user.id),
+    converted_client_id: null,
+    created_at: now,
+    updated_at: now,
   });
-  if (error) throw new Error(error.message);
   revalidatePath("/crm/leads");
 }
 
@@ -108,14 +123,18 @@ export async function updateLeadStatus(leadId: string, status: LeadStatus) {
     return;
   }
 
-  const supabase = requireDb();
-  const { error } = await supabase.from("leads").update({ status }).eq("id", leadId);
-  if (error) throw new Error(error.message);
-  await supabase.from("activities").insert({
+  assertDbReady();
+  const now = new Date().toISOString();
+  await updateDocument(COLLECTIONS.leads, leadId, { status, updated_at: now });
+  await createDocument(COLLECTIONS.activities, {
     type: "status_change" satisfies ActivityType,
     body: `Lead status changed to ${status}`,
     lead_id: leadId,
+    deal_id: null,
+    client_id: null,
+    project_id: null,
     author_id: authorId(user.id),
+    created_at: now,
   });
   revalidatePath("/crm/leads");
   revalidatePath(`/crm/leads/${leadId}`);
@@ -145,9 +164,11 @@ export async function updateLead(leadId: string, formData: FormData) {
     return;
   }
 
-  const supabase = requireDb();
-  const { error } = await supabase.from("leads").update(patch).eq("id", leadId);
-  if (error) throw new Error(error.message);
+  assertDbReady();
+  await updateDocument(COLLECTIONS.leads, leadId, {
+    ...patch,
+    updated_at: new Date().toISOString(),
+  });
   revalidatePath(`/crm/leads/${leadId}`);
   revalidatePath("/crm/leads");
 }
@@ -167,11 +188,10 @@ export async function deleteLead(leadId: string) {
     return;
   }
 
-  const supabase = requireDb();
+  assertDbReady();
   // Clear lead link on deals first (FK may be SET NULL already)
-  await supabase.from("activities").delete().eq("lead_id", leadId);
-  const { error } = await supabase.from("leads").delete().eq("id", leadId);
-  if (error) throw new Error(error.message);
+  await deleteDocuments(COLLECTIONS.activities, { lead_id: leadId });
+  await deleteDocument(COLLECTIONS.leads, leadId);
   revalidatePath("/crm/leads");
 }
 
@@ -219,32 +239,35 @@ export async function createDealFromLead(leadId: string, formData: FormData) {
     return dealId;
   }
 
-  const supabase = requireDb();
-  const { data: lead } = await supabase.from("leads").select("*").eq("id", leadId).single();
+  assertDbReady();
+  const now = new Date().toISOString();
+  const lead = await getDocument(COLLECTIONS.leads, leadId) as unknown as (Lead) | null;
   if (!lead) throw new Error("Lead not found");
   const title =
     String(formData.get("title") || "").trim() ||
     `${lead.company_name || lead.first_name} — Website`;
-  const { data: deal, error } = await supabase
-    .from("deals")
-    .insert({
-      title,
-      lead_id: leadId,
-      amount: Number(formData.get("amount") || lead.estimated_value || 0),
-      stage: "discovery",
-      notes: String(formData.get("notes") || "").trim() || null,
-      owner_id: authorId(user.id),
-    })
-    .select("*")
-    .single();
-  if (error) throw new Error(error.message);
-  await supabase.from("leads").update({ status: "proposal" }).eq("id", leadId);
-  await supabase.from("activities").insert({
+  const deal = await createDocument(COLLECTIONS.deals, {
+    title,
+    lead_id: leadId,
+    client_id: null,
+    amount: Number(formData.get("amount") || lead.estimated_value || 0),
+    stage: "discovery",
+    close_date: null,
+    notes: String(formData.get("notes") || "").trim() || null,
+    owner_id: authorId(user.id),
+    created_at: now,
+    updated_at: now,
+  }) as unknown as (Deal);
+  await updateDocument(COLLECTIONS.leads, leadId, { status: "proposal", updated_at: now });
+  await createDocument(COLLECTIONS.activities, {
     type: "system",
     body: `Deal created: ${title}`,
     lead_id: leadId,
     deal_id: deal.id,
+    client_id: null,
+    project_id: null,
     author_id: authorId(user.id),
+    created_at: now,
   });
   revalidatePath("/crm/deals");
   revalidatePath(`/crm/leads/${leadId}`);
@@ -277,14 +300,18 @@ export async function updateDealStage(dealId: string, stage: DealStage) {
     return;
   }
 
-  const supabase = requireDb();
-  const { error } = await supabase.from("deals").update({ stage }).eq("id", dealId);
-  if (error) throw new Error(error.message);
-  await supabase.from("activities").insert({
+  assertDbReady();
+  const now = new Date().toISOString();
+  await updateDocument(COLLECTIONS.deals, dealId, { stage, updated_at: now });
+  await createDocument(COLLECTIONS.activities, {
     type: "status_change",
     body: `Deal stage changed to ${stage}`,
+    lead_id: null,
     deal_id: dealId,
+    client_id: null,
+    project_id: null,
     author_id: authorId(user.id),
+    created_at: now,
   });
   revalidatePath("/crm/deals");
   revalidatePath(`/crm/deals/${dealId}`);
@@ -313,17 +340,20 @@ export async function createDeal(formData: FormData) {
     return;
   }
 
-  const supabase = requireDb();
-  const { error } = await supabase.from("deals").insert({
+  assertDbReady();
+  const now = new Date().toISOString();
+  await createDocument(COLLECTIONS.deals, {
     title: String(formData.get("title") || "").trim(),
     amount: Number(formData.get("amount") || 0),
     stage: "discovery",
     close_date: String(formData.get("close_date") || "") || null,
     notes: String(formData.get("notes") || "").trim() || null,
     lead_id: String(formData.get("lead_id") || "") || null,
+    client_id: null,
     owner_id: authorId(user.id),
+    created_at: now,
+    updated_at: now,
   });
-  if (error) throw new Error(error.message);
   revalidatePath("/crm/deals");
 }
 
@@ -425,19 +455,17 @@ export async function convertWonDeal(dealId: string, formData: FormData) {
     return { clientId: result.clientId, projectId: result.projectId };
   }
 
-  const supabase = requireDb();
-  const { data: deal } = await supabase
-    .from("deals")
-    .select("*, lead:leads(*)")
-    .eq("id", dealId)
-    .single();
+  assertDbReady();
+  const now = new Date().toISOString();
+  const deal = await getDocument(COLLECTIONS.deals, dealId) as unknown as (Deal) | null;
   if (!deal) throw new Error("Deal not found");
+  const lead = deal.lead_id ? await getDocument(COLLECTIONS.leads, deal.lead_id) as unknown as (Lead) | null : null;
 
   const companyName =
     String(formData.get("client_name") || "").trim() ||
-    deal.lead?.company_name ||
-    `${deal.lead?.first_name || "New"} Client`;
-  const email = String(formData.get("email") || "").trim() || deal.lead?.email || null;
+    lead?.company_name ||
+    `${lead?.first_name || "New"} Client`;
+  const email = String(formData.get("email") || "").trim() || lead?.email || null;
   const createProject = formData.get("create_project") === "on";
   const projectName =
     String(formData.get("project_name") || "").trim() || `${companyName} Website`;
@@ -451,56 +479,65 @@ export async function convertWonDeal(dealId: string, formData: FormData) {
     }
   }
 
-  const { data: clientRow, error: clientError } = await supabase
-    .from("clients")
-    .insert({
-      name: companyName,
-      email,
-      phone: deal.lead?.phone || null,
-      status: "active",
-      primary_user_id: null,
-      created_by: authorId(user.id),
-      notes: `Converted from deal: ${deal.title}`,
-    })
-    .select("*")
-    .single();
-  if (clientError) throw new Error(clientError.message);
+  const clientRow = await createDocument(COLLECTIONS.clients, {
+    name: companyName,
+    email,
+    phone: lead?.phone || null,
+    website: null,
+    status: "active",
+    primary_user_id: null,
+    created_by: authorId(user.id),
+    notes: `Converted from deal: ${deal.title}`,
+    created_at: now,
+    updated_at: now,
+  }) as unknown as (Client);
 
-  await supabase.from("deals").update({ stage: "won", client_id: clientRow.id }).eq("id", dealId);
+  await updateDocument(COLLECTIONS.deals, dealId, {
+    stage: "won",
+    client_id: clientRow.id,
+    updated_at: now,
+  });
   if (deal.lead_id) {
-    await supabase
-      .from("leads")
-      .update({ status: "won", converted_client_id: clientRow.id })
-      .eq("id", deal.lead_id);
+    await updateDocument(COLLECTIONS.leads, deal.lead_id, {
+      status: "won",
+      converted_client_id: clientRow.id,
+      updated_at: now,
+    });
   }
 
   let projectId: string | null = null;
   if (createProject) {
-    const id = await allocateProjectId(supabase, companyName);
-    const { data: project, error: projectError } = await supabase
-      .from("projects")
-      .insert({
-        id,
+    const id = await allocateProjectId(companyName);
+    const project = await createDocument(
+      COLLECTIONS.projects,
+      {
         name: projectName,
+        description: null,
         client_id: clientRow.id,
         status: "discovery",
+        progress: 10,
+        start_date: null,
+        target_launch_date: null,
         deal_id: dealId,
         assigned_to: authorId(user.id),
         created_by: authorId(user.id),
-      })
-      .select("*")
-      .single();
-    if (projectError) throw new Error(projectError.message);
+        created_at: now,
+        updated_at: now,
+      },
+      id
+    ) as unknown as (Project);
     projectId = project.id;
   }
 
-  await supabase.from("activities").insert({
+  await createDocument(COLLECTIONS.activities, {
     type: "system",
     body: `Deal won — client "${companyName}" created`,
+    lead_id: null,
     deal_id: dealId,
     client_id: clientRow.id,
     project_id: projectId,
     author_id: authorId(user.id),
+    created_at: now,
   });
 
   revalidatePath("/crm/deals");
@@ -534,8 +571,8 @@ export async function addActivity(formData: FormData) {
     return;
   }
 
-  const supabase = requireDb();
-  const { error } = await supabase.from("activities").insert({
+  assertDbReady();
+  await createDocument(COLLECTIONS.activities, {
     type: (String(formData.get("type") || "note") as ActivityType) || "note",
     body: String(formData.get("body") || "").trim(),
     lead_id: String(formData.get("lead_id") || "") || null,
@@ -543,8 +580,8 @@ export async function addActivity(formData: FormData) {
     client_id: String(formData.get("client_id") || "") || null,
     project_id: String(formData.get("project_id") || "") || null,
     author_id: authorId(user.id),
+    created_at: new Date().toISOString(),
   });
-  if (error) throw new Error(error.message);
   revalidatePath("/crm/leads");
   revalidatePath("/crm/deals");
   revalidatePath("/crm/clients");
@@ -574,17 +611,20 @@ export async function createClient(formData: FormData) {
     return;
   }
 
-  const supabase = requireDb();
-  const { error } = await supabase.from("clients").insert({
+  assertDbReady();
+  const now = new Date().toISOString();
+  await createDocument(COLLECTIONS.clients, {
     name: String(formData.get("name") || "").trim(),
     email: String(formData.get("email") || "").trim() || null,
     phone: String(formData.get("phone") || "").trim() || null,
     website: String(formData.get("website") || "").trim() || null,
     notes: String(formData.get("notes") || "").trim() || null,
     status: "active",
+    primary_user_id: null,
     created_by: authorId(user.id),
+    created_at: now,
+    updated_at: now,
   });
-  if (error) throw new Error(error.message);
   revalidatePath("/crm/clients");
 }
 
@@ -636,33 +676,30 @@ export async function terminateClient(clientId: string) {
     return;
   }
 
-  const supabase = requireDb();
-  const { data: client, error: fetchError } = await supabase
-    .from("clients")
-    .select("id, status, name")
-    .eq("id", clientId)
-    .maybeSingle();
-  if (fetchError) throw new Error(fetchError.message);
+  assertDbReady();
+  const now = new Date().toISOString();
+  const client = await getDocument(COLLECTIONS.clients, clientId) as unknown as (Client) | null;
   if (!client) throw new Error("Client not found");
   if (client.status === "churned") throw new Error("Client is already terminated");
 
-  const { error } = await supabase
-    .from("clients")
-    .update({ status: "churned" })
-    .eq("id", clientId);
-  if (error) throw new Error(error.message);
+  await updateDocument(COLLECTIONS.clients, clientId, { status: "churned", updated_at: now });
 
-  await supabase
-    .from("projects")
-    .update({ status: "terminated" })
-    .eq("client_id", clientId)
-    .not("status", "in", '("completed","terminated")');
+  await updateDocuments(
+    COLLECTIONS.projects,
+    { client_id: clientId },
+    { status: "terminated", updated_at: now },
+    { notIn: { attr: "status", values: ["completed", "terminated"] } }
+  );
 
-  await supabase.from("activities").insert({
+  await createDocument(COLLECTIONS.activities, {
     type: "system",
     body: "Client terminated by owner",
+    lead_id: null,
+    deal_id: null,
     client_id: clientId,
+    project_id: null,
     author_id: null,
+    created_at: now,
   });
 
   revalidatePath("/crm/clients");
@@ -714,23 +751,20 @@ export async function reactivateClient(clientId: string) {
     return;
   }
 
-  const supabase = requireDb();
-  const { data: client } = await supabase
-    .from("clients")
-    .select("id, name")
-    .eq("id", clientId)
-    .maybeSingle();
-  const { error } = await supabase
-    .from("clients")
-    .update({ status: "active" })
-    .eq("id", clientId);
-  if (error) throw new Error(error.message);
+  assertDbReady();
+  const now = new Date().toISOString();
+  const client = await getDocument(COLLECTIONS.clients, clientId) as unknown as (Client) | null;
+  await updateDocument(COLLECTIONS.clients, clientId, { status: "active", updated_at: now });
 
-  await supabase.from("activities").insert({
+  await createDocument(COLLECTIONS.activities, {
     type: "system",
     body: "Client reactivated by owner",
+    lead_id: null,
+    deal_id: null,
     client_id: clientId,
+    project_id: null,
     author_id: null,
+    created_at: now,
   });
 
   revalidatePath("/crm/clients");
@@ -787,25 +821,49 @@ async function sendRoleInvitation(email: string, role: UserRole) {
         })
       )
     );
-    if (isSupabaseConfigured()) {
-      const supabase = getSupabaseAdmin();
-      await supabase.from("users").update({ role }).ilike("email", normalized);
+    if (isDataConfigured()) {
+      const existing = await findByEmailIlike(COLLECTIONS.users, normalized) as unknown as (DbUser) | null;
+      if (existing) {
+        await updateDocument(COLLECTIONS.users, existing.id, {
+          role,
+          updated_at: new Date().toISOString(),
+        });
+      }
     }
     return;
   }
+
+  // Revoke any pending invite for this email so Clerk sends a fresh email
+  // (ignoreExisting alone can leave a pending invite without resending).
+  try {
+    const { data: existingInvites } = await client.invitations.getInvitationList({
+      query: normalized,
+    });
+    await Promise.all(
+      existingInvites
+        .filter(
+          (inv) =>
+            inv.emailAddress.toLowerCase() === normalized && inv.status === "pending"
+        )
+        .map((inv) => client.invitations.revokeInvitation(inv.id))
+    );
+  } catch (e) {
+    console.warn("Could not revoke prior invitations:", e);
+  }
+
+  const appUrl = (process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000").replace(
+    /\/$/,
+    ""
+  );
 
   try {
     await client.invitations.createInvitation({
       emailAddress: normalized,
       publicMetadata: { role },
-      // Clerk returns 400 if this email was invited before (even accepted). Allow resend.
-      ignoreExisting: true,
-      redirectUrl:
-        role === "client"
-          ? `${process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"}/portal/dashboard`
-          : role === "sales"
-            ? `${process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"}/onboarding/sales`
-            : `${process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"}/crm/dashboard`,
+      notify: true,
+      // Must land on SignUp so Clerk can accept the invitation ticket.
+      // Sales → /onboarding/sales is handled by the CRM layout after sign-up.
+      redirectUrl: `${appUrl}/sign-up`,
     });
   } catch (e) {
     throw new Error(formatClerkInviteError(e));
@@ -817,9 +875,14 @@ async function sendRoleInvitation(email: string, role: UserRole) {
     console.warn("Could not sync Clerk role for existing user:", e);
   }
 
-  if (isSupabaseConfigured()) {
-    const supabase = getSupabaseAdmin();
-    await supabase.from("users").update({ role }).ilike("email", normalized);
+  if (isDataConfigured()) {
+    const existing = await findByEmailIlike(COLLECTIONS.users, normalized) as unknown as (DbUser) | null;
+    if (existing) {
+      await updateDocument(COLLECTIONS.users, existing.id, {
+        role,
+        updated_at: new Date().toISOString(),
+      });
+    }
   }
 }
 
@@ -831,11 +894,18 @@ function formatClerkInviteError(error: unknown): string {
     status?: number;
   };
   const first = err.errors?.[0];
+  const code = first?.code;
   const detail = first?.long_message || first?.message || err.message;
-  if (first?.code === "duplicate_record") {
+  if (code === "dev_monthly_email_limit_exceeded") {
+    return (
+      "Clerk development email limit reached. Use a +clerk_test address " +
+      "(see https://clerk.com/docs/guides/development/testing/test-emails) or wait for the monthly reset."
+    );
+  }
+  if (code === "duplicate_record") {
     return (
       detail ||
-      "This email already has an invitation. Check Clerk → Users → Invitations, or ask them to check their inbox."
+      "This email already has an invitation. Check Clerk → Users → Invitations, or ask them to check their inbox/spam."
     );
   }
   return detail || "Failed to send invitation";
@@ -885,37 +955,48 @@ export async function requestClientInvite(formData: FormData) {
     return;
   }
 
-  const supabase = requireDb();
-  const { data: existing, error: existingError } = await supabase
-    .from("client_invite_requests")
-    .select("id")
-    .eq("status", "pending")
-    .ilike("email", email)
-    .maybeSingle();
-  if (existingError) {
-    if (isMissingClientInviteTable(existingError)) {
-      throw new Error(
-        "Database setup incomplete. Run supabase/migrations/003_client_invite_requests.sql in the Supabase SQL Editor, then try again."
-      );
+  assertDbReady();
+  const now = new Date().toISOString();
+  try {
+    const pending = await listDocuments(COLLECTIONS.client_invite_requests, {
+      equal: { status: "pending" },
+    }) as unknown as (ClientInviteRequest)[];
+    const existing = pending.find((r) => r.email.toLowerCase() === email);
+    if (existing) throw new Error("A pending request already exists for this email");
+  } catch (e) {
+    if (e instanceof Error && e.message === "A pending request already exists for this email") {
+      throw e;
     }
-    throw new Error(existingError.message);
-  }
-  if (existing) throw new Error("A pending request already exists for this email");
-
-  const { error } = await supabase.from("client_invite_requests").insert({
-    email,
-    client_name: clientName,
-    note,
-    status: "pending",
-    requested_by: authorId(user.id),
-  });
-  if (error) {
+    const error = { message: e instanceof Error ? e.message : String(e) };
     if (isMissingClientInviteTable(error)) {
       throw new Error(
-        "Database setup incomplete. Run supabase/migrations/003_client_invite_requests.sql in the Supabase SQL Editor, then try again."
+        "Database setup incomplete. Run supabase/migrations/003_client_invite_requests.sql (or create the Appwrite client_invite_requests collection), then try again."
       );
     }
-    throw new Error(error.message);
+    throw e;
+  }
+
+  try {
+    await createDocument(COLLECTIONS.client_invite_requests, {
+      email,
+      client_name: clientName,
+      note,
+      status: "pending",
+      requested_by: authorId(user.id),
+      reviewed_by: null,
+      reviewed_at: null,
+      review_note: null,
+      created_at: now,
+      updated_at: now,
+    });
+  } catch (e) {
+    const error = { message: e instanceof Error ? e.message : String(e) };
+    if (isMissingClientInviteTable(error)) {
+      throw new Error(
+        "Database setup incomplete. Run supabase/migrations/003_client_invite_requests.sql (or create the Appwrite client_invite_requests collection), then try again."
+      );
+    }
+    throw e;
   }
   revalidatePath("/crm/team");
   await recordAuditLog({
@@ -955,27 +1036,19 @@ export async function approveClientInviteRequest(requestId: string) {
     return;
   }
 
-  const supabase = requireDb();
-  const { data: row, error: fetchError } = await supabase
-    .from("client_invite_requests")
-    .select("*")
-    .eq("id", requestId)
-    .maybeSingle();
-  if (fetchError) throw new Error(fetchError.message);
+  assertDbReady();
+  const row = await getDocument(COLLECTIONS.client_invite_requests, requestId) as unknown as (ClientInviteRequest) | null;
   if (!row) throw new Error("Request not found");
   if (row.status !== "pending") throw new Error("Request is no longer pending");
 
   await sendRoleInvitation(row.email, "client");
 
-  const { error } = await supabase
-    .from("client_invite_requests")
-    .update({
-      status: "approved",
-      reviewed_by: authorId(owner.id),
-      reviewed_at: new Date().toISOString(),
-    })
-    .eq("id", requestId);
-  if (error) throw new Error(error.message);
+  await updateDocument(COLLECTIONS.client_invite_requests, requestId, {
+    status: "approved",
+    reviewed_by: authorId(owner.id),
+    reviewed_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  });
   revalidatePath("/crm/team");
   await recordAuditLog({
     action: "client_invite.approved",
@@ -1015,26 +1088,18 @@ export async function rejectClientInviteRequest(requestId: string, reviewNote?: 
     return;
   }
 
-  const supabase = requireDb();
-  const { data: row, error: fetchError } = await supabase
-    .from("client_invite_requests")
-    .select("id, status, email")
-    .eq("id", requestId)
-    .maybeSingle();
-  if (fetchError) throw new Error(fetchError.message);
+  assertDbReady();
+  const row = await getDocument(COLLECTIONS.client_invite_requests, requestId) as unknown as (ClientInviteRequest) | null;
   if (!row) throw new Error("Request not found");
   if (row.status !== "pending") throw new Error("Request is no longer pending");
 
-  const { error } = await supabase
-    .from("client_invite_requests")
-    .update({
-      status: "rejected",
-      reviewed_by: authorId(owner.id),
-      reviewed_at: new Date().toISOString(),
-      review_note: reviewNote?.trim() || null,
-    })
-    .eq("id", requestId);
-  if (error) throw new Error(error.message);
+  await updateDocument(COLLECTIONS.client_invite_requests, requestId, {
+    status: "rejected",
+    reviewed_by: authorId(owner.id),
+    reviewed_at: new Date().toISOString(),
+    review_note: reviewNote?.trim() || null,
+    updated_at: new Date().toISOString(),
+  });
   revalidatePath("/crm/team");
   await recordAuditLog({
     action: "client_invite.rejected",
@@ -1046,11 +1111,3 @@ export async function rejectClientInviteRequest(requestId: string, reviewNote?: 
     metadata: { reviewNote: reviewNote?.trim() || null },
   });
 }
-
-/**
- * Permanently remove a sales rep or client from Clerk + Supabase.
- * Owners cannot remove themselves or other owners.
- * @deprecated Import from `@/lib/actions/members` instead.
- */
-export { removePortalMember } from "@/lib/actions/members";
-

@@ -3,17 +3,16 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireStaff } from "@/lib/auth/roles";
-import { getSupabaseAdmin, isSupabaseConfigured } from "@/lib/db/supabase";
+import { isDataConfigured, updateDocument, upsertById, COLLECTIONS } from "@/lib/db/repo";
 import { isMissingSalesProfilesTable } from "@/lib/db/queries";
 import { isDemoMode } from "@/lib/demo/mode";
 import { mutateStore, touch } from "@/lib/demo/store";
 import type { SalesProfile } from "@/lib/types";
 
-function requireDb() {
-  if (!isSupabaseConfigured()) {
-    throw new Error("Supabase is not configured. Add credentials to .env.local");
+function assertDbReady() {
+  if (!isDataConfigured()) {
+    throw new Error("Database is not configured. Add credentials to .env.local");
   }
-  return getSupabaseAdmin();
 }
 
 function splitName(fullName: string): { first: string | null; last: string | null } {
@@ -96,21 +95,19 @@ export async function completeSalesOnboarding(formData: FormData) {
     redirect("/crm/dashboard");
   }
 
-  const supabase = requireDb();
+  assertDbReady();
+  const nowIso = new Date().toISOString();
 
-  const { error: userError } = await supabase
-    .from("users")
-    .update({
-      first_name: first,
-      last_name: last,
-      email,
-      phone,
-    })
-    .eq("id", user.id);
-  if (userError) throw new Error(userError.message);
+  await updateDocument(COLLECTIONS.users, user.id, {
+    first_name: first,
+    last_name: last,
+    email,
+    phone,
+    updated_at: nowIso,
+  });
 
-  const { error } = await supabase.from("sales_profiles").upsert(
-    {
+  try {
+    await upsertById(COLLECTIONS.sales_profiles, user.id, {
       user_id: user.id,
       full_name: fullName,
       email,
@@ -120,18 +117,17 @@ export async function completeSalesOnboarding(formData: FormData) {
       target_region: targetRegion,
       daily_call_goal: dailyCallGoal,
       weekly_meeting_goal: weeklyMeetingGoal,
-      completed_at: new Date().toISOString(),
-    },
-    { onConflict: "user_id" }
-  );
-
-  if (error) {
-    if (isMissingSalesProfilesTable(error)) {
+      completed_at: nowIso,
+      updated_at: nowIso,
+    });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    if (isMissingSalesProfilesTable({ message })) {
       throw new Error(
-        "Database setup incomplete. Run supabase/migrations/004_sales_profiles.sql in the Supabase SQL Editor, then try again."
+        "Database setup incomplete. Run supabase/migrations/004_sales_profiles.sql (or create the Appwrite sales_profiles collection), then try again."
       );
     }
-    throw new Error(error.message);
+    throw e;
   }
 
   revalidatePath("/crm");

@@ -1,14 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
 import { recordAuditLog } from "@/lib/audit/log";
-import { getSupabaseAdmin, isSupabaseConfigured } from "@/lib/db/supabase";
+import { isDataConfigured, getDocument, updateDocument, COLLECTIONS } from "@/lib/db/repo";
 
 export async function POST(req: NextRequest) {
   const secret = process.env.STRIPE_WEBHOOK_SECRET;
   const key = process.env.STRIPE_SECRET_KEY;
 
-  if (!secret || !key || !isSupabaseConfigured()) {
-    return NextResponse.json({ error: "Stripe/Supabase not configured" }, { status: 500 });
+  if (!secret || !key || !isDataConfigured()) {
+    return NextResponse.json({ error: "Stripe or database not configured" }, { status: 500 });
   }
 
   const stripe = new Stripe(key);
@@ -31,25 +31,21 @@ export async function POST(req: NextRequest) {
     const session = event.data.object as Stripe.Checkout.Session;
     const invoiceId = session.metadata?.invoice_id;
     if (invoiceId) {
-      const supabase = getSupabaseAdmin();
-      const { data: invoice } = await supabase
-        .from("invoices")
-        .select("id, invoice_number")
-        .eq("id", invoiceId)
-        .maybeSingle();
+      const invoice = await getDocument(
+        COLLECTIONS.invoices,
+        invoiceId
+      ) as unknown as ({ id: string; invoice_number: string }) | null;
 
-      await supabase
-        .from("invoices")
-        .update({
-          status: "paid",
-          paid_at: new Date().toISOString(),
-          stripe_checkout_session_id: session.id,
-          stripe_payment_intent_id:
-            typeof session.payment_intent === "string"
-              ? session.payment_intent
-              : session.payment_intent?.id ?? null,
-        })
-        .eq("id", invoiceId);
+      await updateDocument(COLLECTIONS.invoices, invoiceId, {
+        status: "paid",
+        paid_at: new Date().toISOString(),
+        stripe_checkout_session_id: session.id,
+        stripe_payment_intent_id:
+          typeof session.payment_intent === "string"
+            ? session.payment_intent
+            : session.payment_intent?.id ?? null,
+        updated_at: new Date().toISOString(),
+      });
 
       await recordAuditLog({
         action: "invoice.paid",

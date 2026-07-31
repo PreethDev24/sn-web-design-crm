@@ -5,19 +5,25 @@ import { headers } from "next/headers";
 import Stripe from "stripe";
 import { requireClient, requireInvoiceAccess, requireContractAccess, requireStaff } from "@/lib/auth/roles";
 import { recordAuditLog } from "@/lib/audit/log";
-import { getSupabaseAdmin, isSupabaseConfigured } from "@/lib/db/supabase";
+import {
+  isDataConfigured,
+  createDocument,
+  updateDocument,
+  getDocument,
+  uploadToBucket,
+  COLLECTIONS,
+} from "@/lib/db/repo";
 import { isDemoMode, isStripeConfigured } from "@/lib/demo/mode";
 import { mutateStore, newId, touch } from "@/lib/demo/store";
-import type { Contract, Invoice, MaintenancePlan } from "@/lib/types";
+import type { Client, Contract, Invoice, MaintenancePlan } from "@/lib/types";
 import { nanoid } from "nanoid";
 import fs from "fs";
 import path from "path";
 
-function requireDb() {
-  if (!isSupabaseConfigured()) {
-    throw new Error("Supabase is not configured. Add credentials to .env.local");
+function assertDbReady() {
+  if (!isDataConfigured()) {
+    throw new Error("Database is not configured. Add credentials to .env.local");
   }
-  return getSupabaseAdmin();
 }
 
 function getStripe() {
@@ -74,34 +80,37 @@ export async function createContract(formData: FormData) {
     return;
   }
 
-  const supabase = requireDb();
+  assertDbReady();
+  const now = new Date().toISOString();
   if (file && file.size > 0) {
     const storagePath = `${nanoid()}.${file.name.split(".").pop() || "pdf"}`;
-    const { error: uploadError } = await supabase.storage
-      .from("contracts")
-      .upload(storagePath, Buffer.from(await file.arrayBuffer()), {
-        contentType: file.type,
-        upsert: false,
-      });
-    if (uploadError) {
-      throw new Error(
-        `Upload failed: ${uploadError.message}. Create a Storage bucket named "contracts".`
-      );
+    try {
+      const uploaded = await uploadToBucket("contracts", storagePath, file, file.name);
+      fileUrl = uploaded.publicUrl;
+      fileName = file.name;
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      throw new Error(`Upload failed: ${message}. Create a storage bucket named "contracts".`);
     }
-    fileUrl = supabase.storage.from("contracts").getPublicUrl(storagePath).data.publicUrl;
-    fileName = file.name;
   }
 
-  const { error } = await supabase.from("contracts").insert({
+  await createDocument(COLLECTIONS.contracts, {
     title: String(formData.get("title") || "").trim(),
     client_id: String(formData.get("client_id") || ""),
     project_id: String(formData.get("project_id") || "") || null,
     file_url: fileUrl,
     file_name: fileName,
     status: "draft",
+    sent_at: null,
+    viewed_at: null,
+    signed_at: null,
+    signature_data: null,
+    signer_ip: null,
+    signer_user_agent: null,
     created_by: user.id === "local-dev-user" ? null : user.id,
+    created_at: now,
+    updated_at: now,
   });
-  if (error) throw new Error(error.message);
   revalidatePath("/crm/contracts");
 }
 
@@ -130,17 +139,14 @@ export async function sendContract(contractId: string) {
     return;
   }
 
-  const supabase = requireDb();
-  const { data: contract } = await supabase
-    .from("contracts")
-    .select("id, title")
-    .eq("id", contractId)
-    .maybeSingle();
-  const { error } = await supabase
-    .from("contracts")
-    .update({ status: "sent", sent_at: new Date().toISOString() })
-    .eq("id", contractId);
-  if (error) throw new Error(error.message);
+  assertDbReady();
+  const now = new Date().toISOString();
+  const contract = await getDocument(COLLECTIONS.contracts, contractId) as unknown as ({ id: string; title: string }) | null;
+  await updateDocument(COLLECTIONS.contracts, contractId, {
+    status: "sent",
+    sent_at: now,
+    updated_at: now,
+  });
   revalidatePath("/crm/contracts");
   revalidatePath("/portal/contracts");
   await recordAuditLog({
@@ -183,25 +189,19 @@ export async function signContract(contractId: string, signatureData: string) {
     return;
   }
 
-  const supabase = requireDb();
-  const { data: contract } = await supabase
-    .from("contracts")
-    .select("*")
-    .eq("id", contractId)
-    .single();
+  assertDbReady();
+  const now = new Date().toISOString();
+  const contract = await getDocument(COLLECTIONS.contracts, contractId) as unknown as (Contract) | null;
   if (!contract) throw new Error("Contract not found");
 
-  const { error } = await supabase
-    .from("contracts")
-    .update({
-      status: "signed",
-      signed_at: new Date().toISOString(),
-      signature_data: { signature: signatureData, typedAt: new Date().toISOString() },
-      signer_ip: hdrs.get("x-forwarded-for") || hdrs.get("x-real-ip"),
-      signer_user_agent: hdrs.get("user-agent"),
-    })
-    .eq("id", contractId);
-  if (error) throw new Error(error.message);
+  await updateDocument(COLLECTIONS.contracts, contractId, {
+    status: "signed",
+    signed_at: now,
+    signature_data: { signature: signatureData, typedAt: now },
+    signer_ip: hdrs.get("x-forwarded-for") || hdrs.get("x-real-ip"),
+    signer_user_agent: hdrs.get("user-agent"),
+    updated_at: now,
+  });
   revalidatePath("/portal/contracts");
   revalidatePath(`/portal/contracts/${contractId}`);
   revalidatePath("/crm/contracts");
@@ -256,8 +256,9 @@ export async function createInvoice(formData: FormData) {
     return;
   }
 
-  const supabase = requireDb();
-  const { error } = await supabase.from("invoices").insert({
+  assertDbReady();
+  const now = new Date().toISOString();
+  await createDocument(COLLECTIONS.invoices, {
     invoice_number: invoiceNumber,
     title: String(formData.get("title") || "").trim(),
     description: String(formData.get("description") || "").trim() || null,
@@ -267,9 +268,13 @@ export async function createInvoice(formData: FormData) {
     currency: String(formData.get("currency") || "USD"),
     due_date: String(formData.get("due_date") || "") || null,
     status: "draft",
+    paid_at: null,
+    stripe_checkout_session_id: null,
+    stripe_payment_intent_id: null,
     created_by: user.id === "local-dev-user" ? null : user.id,
+    created_at: now,
+    updated_at: now,
   });
-  if (error) throw new Error(error.message);
   revalidatePath("/crm/invoices");
   await recordAuditLog({
     action: "invoice.created",
@@ -308,17 +313,13 @@ export async function sendInvoice(invoiceId: string) {
     return;
   }
 
-  const supabase = requireDb();
-  const { data: inv } = await supabase
-    .from("invoices")
-    .select("id, invoice_number")
-    .eq("id", invoiceId)
-    .maybeSingle();
-  const { error } = await supabase
-    .from("invoices")
-    .update({ status: "sent" })
-    .eq("id", invoiceId);
-  if (error) throw new Error(error.message);
+  assertDbReady();
+  const now = new Date().toISOString();
+  const inv = await getDocument(
+    COLLECTIONS.invoices,
+    invoiceId
+  ) as unknown as ({ id: string; invoice_number: string }) | null;
+  await updateDocument(COLLECTIONS.invoices, invoiceId, { status: "sent", updated_at: now });
   revalidatePath("/crm/invoices");
   revalidatePath("/portal/invoices");
   await recordAuditLog({
@@ -347,42 +348,34 @@ export async function createCheckoutSession(invoiceId: string) {
         inv.stripe_checkout_session_id = `demo_${nanoid()}`;
         inv.updated_at = touch();
       });
-    } else if (isSupabaseConfigured()) {
-      const supabase = requireDb();
-      const { data: invoice } = await supabase
-        .from("invoices")
-        .select("*")
-        .eq("id", invoiceId)
-        .single();
+    } else if (isDataConfigured()) {
+      const invoice = await getDocument(COLLECTIONS.invoices, invoiceId) as unknown as (Invoice) | null;
       if (!invoice) throw new Error("Invoice not found");
       if (invoice.status === "paid") throw new Error("Invoice already paid");
-      await supabase
-        .from("invoices")
-        .update({
-          status: "paid",
-          paid_at: new Date().toISOString(),
-          stripe_checkout_session_id: `demo_${nanoid()}`,
-        })
-        .eq("id", invoiceId);
+      await updateDocument(COLLECTIONS.invoices, invoiceId, {
+        status: "paid",
+        paid_at: new Date().toISOString(),
+        stripe_checkout_session_id: `demo_${nanoid()}`,
+        updated_at: new Date().toISOString(),
+      });
     }
     revalidatePath("/portal/invoices");
     revalidatePath("/crm/invoices");
     return `${appUrl}/portal/invoices?paid=1`;
   }
 
-  const supabase = requireDb();
+  assertDbReady();
   const stripe = getStripe();
-  const { data: invoice } = await supabase
-    .from("invoices")
-    .select("*, client:clients(*)")
-    .eq("id", invoiceId)
-    .single();
+  const invoice = await getDocument(COLLECTIONS.invoices, invoiceId) as unknown as (Invoice) | null;
   if (!invoice) throw new Error("Invoice not found");
   if (invoice.status === "paid") throw new Error("Invoice already paid");
+  const client = invoice.client_id
+    ? await getDocument(COLLECTIONS.clients, invoice.client_id) as unknown as (Client) | null
+    : null;
 
   const session = await stripe.checkout.sessions.create({
     mode: "payment",
-    customer_email: invoice.client?.email || undefined,
+    customer_email: client?.email || undefined,
     line_items: [
       {
         quantity: 1,
@@ -401,13 +394,11 @@ export async function createCheckoutSession(invoiceId: string) {
     cancel_url: `${appUrl}/portal/invoices/${invoice.id}`,
   });
 
-  await supabase
-    .from("invoices")
-    .update({
-      stripe_checkout_session_id: session.id,
-      status: invoice.status === "draft" ? "sent" : invoice.status,
-    })
-    .eq("id", invoiceId);
+  await updateDocument(COLLECTIONS.invoices, invoiceId, {
+    stripe_checkout_session_id: session.id,
+    status: invoice.status === "draft" ? "sent" : invoice.status,
+    updated_at: new Date().toISOString(),
+  });
 
   return session.url;
 }
@@ -433,14 +424,16 @@ export async function createMaintenancePlan(formData: FormData) {
     return;
   }
 
-  const supabase = requireDb();
-  const { error } = await supabase.from("maintenance_plans").insert({
+  assertDbReady();
+  const now = new Date().toISOString();
+  await createDocument(COLLECTIONS.maintenance_plans, {
     client_id: String(formData.get("client_id") || ""),
     name: String(formData.get("name") || "").trim(),
     monthly_amount: Number(formData.get("monthly_amount") || 0),
     notes: String(formData.get("notes") || "").trim() || null,
     status: "active",
+    created_at: now,
+    updated_at: now,
   });
-  if (error) throw new Error(error.message);
   revalidatePath("/crm/clients");
 }

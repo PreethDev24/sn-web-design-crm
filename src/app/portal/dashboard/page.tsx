@@ -9,11 +9,11 @@ import {
 import { formatCurrency } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { isSupabaseConfigured } from "@/lib/db/supabase";
+import { isDbConfigured } from "@/lib/db/backend";
 
 export default async function PortalDashboardPage() {
   const user = await requireClient();
-  const configured = isSupabaseConfigured();
+  const configured = isDbConfigured();
   const client = configured ? await getClientForUser(user.id) : null;
 
   const [projects, contracts, invoices] = client

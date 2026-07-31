@@ -33,8 +33,10 @@ export default async function AuditLogPage() {
           <p className="font-medium">One-time database setup required</p>
           <p className="mt-1">
             Run{" "}
-            <code className="rounded bg-amber-100 px-1">supabase/migrations/009_audit_logs.sql</code>{" "}
-            in the Supabase SQL Editor, then refresh this page.
+            <code className="rounded bg-amber-100 px-1">npm run appwrite:setup</code>{" "}
+            to create the{" "}
+            <code className="rounded bg-amber-100 px-1">audit_logs</code> collection, then refresh
+            this page.
           </p>
         </div>
       )}

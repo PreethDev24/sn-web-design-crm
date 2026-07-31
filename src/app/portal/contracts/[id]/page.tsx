@@ -2,7 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requireClient } from "@/lib/auth/roles";
 import { getClientForUser, getContract } from "@/lib/db/queries";
-import { getSupabaseAdmin, isSupabaseConfigured } from "@/lib/db/supabase";
+import { isDataConfigured, updateDocument, COLLECTIONS } from "@/lib/db/repo";
 import { isDemoMode } from "@/lib/demo/mode";
 import { mutateStore, touch } from "@/lib/demo/store";
 import { formatDate } from "@/lib/utils";
@@ -31,11 +31,11 @@ export default async function PortalContractDetailPage({
           c.updated_at = touch();
         }
       });
-    } else if (isSupabaseConfigured()) {
-      await getSupabaseAdmin()
-        .from("contracts")
-        .update({ status: "viewed", viewed_at: new Date().toISOString() })
-        .eq("id", id);
+    } else if (isDataConfigured()) {
+      await updateDocument(COLLECTIONS.contracts, id, {
+        status: "viewed",
+        viewed_at: new Date().toISOString(),
+      });
     }
   }
 

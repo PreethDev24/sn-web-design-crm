@@ -13,7 +13,15 @@ import {
   notifyChatMessageIfOffline,
   notifyChatPing,
 } from "@/lib/email/chat-notifications";
-import { getSupabaseAdmin, isSupabaseConfigured } from "@/lib/db/supabase";
+import {
+  isDataConfigured,
+  listDocuments,
+  getDocument,
+  createDocument,
+  updateDocument,
+  findOneBy,
+  COLLECTIONS,
+} from "@/lib/db/repo";
 import { isDemoMode } from "@/lib/demo/mode";
 import { mutateStore, newId, readStore, touch } from "@/lib/demo/store";
 import type { Conversation, DbUser, Message } from "@/lib/types";
@@ -23,11 +31,14 @@ const TYPING_TTL_MS = 4000;
 const PING_COOLDOWN_MS = 30_000;
 const PING_BODY = "🔔 Ping";
 
-function requireDb() {
-  if (!isSupabaseConfigured()) {
-    throw new Error("Supabase is not configured. Add credentials to .env.local");
+function assertDbReady() {
+  if (!isDataConfigured()) {
+    throw new Error("Database is not configured. Add credentials to .env.local");
   }
-  return getSupabaseAdmin();
+}
+
+function toErrorInfo(e: unknown): { message: string } {
+  return { message: e instanceof Error ? e.message : String(e) };
 }
 
 function revalidateChatPaths() {
@@ -43,13 +54,8 @@ async function loadUserById(id: string): Promise<DbUser | null> {
   if (isDemoMode()) {
     return readStore().users.find((u) => u.id === id) ?? null;
   }
-  const { data, error } = await requireDb()
-    .from("users")
-    .select("*")
-    .eq("id", id)
-    .maybeSingle();
-  if (error) throw new Error(error.message);
-  return (data as DbUser) ?? null;
+  if (!isDataConfigured()) return null;
+  return getDocument(COLLECTIONS.users, id) as unknown as (DbUser) | null;
 }
 
 async function touchUserLastSeen(userId: string) {
@@ -61,14 +67,15 @@ async function touchUserLastSeen(userId: string) {
     });
     return;
   }
-  if (!isSupabaseConfigured() || userId === "local-dev-user") return;
-  const { error } = await requireDb()
-    .from("users")
-    .update({ last_seen_at: ts })
-    .eq("id", userId);
-  // Column may be missing until migration 008 is applied
-  if (error && !error.message.includes("last_seen_at")) {
-    console.warn("Failed to update last_seen_at:", error.message);
+  if (!isDataConfigured() || userId === "local-dev-user") return;
+  try {
+    await updateDocument(COLLECTIONS.users, userId, { last_seen_at: ts });
+  } catch (e) {
+    const info = toErrorInfo(e);
+    // Column/attribute may be missing until the relevant migration is applied
+    if (!info.message.includes("last_seen_at")) {
+      console.warn("Failed to update last_seen_at:", info.message);
+    }
   }
 }
 
@@ -94,12 +101,14 @@ async function clearTypingForViewer(conversationId: string, viewerId: string) {
     });
     return;
   }
-  if (!isSupabaseConfigured()) return;
-  await requireDb()
-    .from("conversations")
-    .update({ typing_user_id: null, typing_until: null })
-    .eq("id", conversationId)
-    .eq("typing_user_id", viewerId);
+  if (!isDataConfigured()) return;
+  const conv = await getDocument(COLLECTIONS.conversations, conversationId) as unknown as (Conversation) | null;
+  if (conv?.typing_user_id === viewerId) {
+    await updateDocument(COLLECTIONS.conversations, conversationId, {
+      typing_user_id: null,
+      typing_until: null,
+    });
+  }
 }
 
 async function notifyRecipient(params: {
@@ -162,45 +171,36 @@ export async function startConversation(partnerId: string) {
     return conversationId;
   }
 
-  const supabase = requireDb();
-  const { data: existing, error: findError } = await supabase
-    .from("conversations")
-    .select("id")
-    .eq("participant_one_id", one)
-    .eq("participant_two_id", two)
-    .maybeSingle();
-  if (findError) {
-    if (isMissingChatTables(findError)) {
-      throw new Error(
-        "Chat tables missing — run supabase/migrations/006_chat.sql in Supabase"
-      );
+  assertDbReady();
+  try {
+    const existing = await findOneBy(COLLECTIONS.conversations, {
+      participant_one_id: one,
+      participant_two_id: two,
+    }) as unknown as ({ id: string }) | null;
+    if (existing?.id) {
+      revalidateChatPaths();
+      return existing.id;
     }
-    throw new Error(findError.message);
-  }
-  if (existing?.id) {
-    revalidateChatPaths();
-    return existing.id as string;
-  }
 
-  const { data, error } = await supabase
-    .from("conversations")
-    .insert({
+    const created = await createDocument(COLLECTIONS.conversations, {
       participant_one_id: one,
       participant_two_id: two,
       last_message_at: ts,
-    })
-    .select("id")
-    .single();
-  if (error) {
-    if (isMissingChatTables(error)) {
+      created_at: ts,
+      updated_at: ts,
+      typing_user_id: null,
+      typing_until: null,
+    }) as unknown as ({ id: string });
+    revalidateChatPaths();
+    return created.id;
+  } catch (e) {
+    if (isMissingChatTables(toErrorInfo(e))) {
       throw new Error(
-        "Chat tables missing — run supabase/migrations/006_chat.sql in Supabase"
+        "Chat tables missing — run supabase/migrations/006_chat.sql, or create the Appwrite conversations/messages collections"
       );
     }
-    throw new Error(error.message);
+    throw e;
   }
-  revalidateChatPaths();
-  return data.id as string;
 }
 
 export async function sendMessage(conversationId: string, body: string) {
@@ -254,40 +254,31 @@ export async function sendMessage(conversationId: string, body: string) {
     return;
   }
 
-  const supabase = requireDb();
-  const { error } = await supabase.from("messages").insert({
-    conversation_id: conversationId,
-    sender_id: viewer.id,
-    body: text,
-    kind: "text",
-  });
-  if (error) {
-    if (isMissingChatTables(error)) {
+  assertDbReady();
+  try {
+    await createDocument(COLLECTIONS.messages, {
+      conversation_id: conversationId,
+      sender_id: viewer.id,
+      body: text,
+      kind: "text",
+      created_at: ts,
+      read_at: null,
+    });
+  } catch (e) {
+    if (isMissingChatTables(toErrorInfo(e))) {
       throw new Error(
-        "Chat tables missing — run supabase/migrations/006_chat.sql in Supabase"
+        "Chat tables missing — run supabase/migrations/006_chat.sql, or create the Appwrite conversations/messages collections"
       );
     }
-    if (error.message.includes("kind")) {
-      const retry = await supabase.from("messages").insert({
-        conversation_id: conversationId,
-        sender_id: viewer.id,
-        body: text,
-      });
-      if (retry.error) throw new Error(retry.error.message);
-    } else {
-      throw new Error(error.message);
-    }
+    throw e;
   }
 
-  await supabase
-    .from("conversations")
-    .update({
-      last_message_at: ts,
-      updated_at: ts,
-      typing_user_id: null,
-      typing_until: null,
-    })
-    .eq("id", conversationId);
+  await updateDocument(COLLECTIONS.conversations, conversationId, {
+    last_message_at: ts,
+    updated_at: ts,
+    typing_user_id: null,
+    typing_until: null,
+  });
 
   revalidateChatPaths();
   await notifyRecipient({
@@ -355,55 +346,43 @@ export async function sendPing(conversationId: string) {
     return;
   }
 
-  const supabase = requireDb();
-  const { data: recentPings, error: recentError } = await supabase
-    .from("messages")
-    .select("id, kind, body, created_at")
-    .eq("conversation_id", conversationId)
-    .eq("sender_id", viewer.id)
-    .gte("created_at", cutoff)
-    .order("created_at", { ascending: false })
-    .limit(10);
-  if (recentError && !isMissingChatTables(recentError)) {
-    throw new Error(recentError.message);
-  }
-  const tooSoon = (recentPings ?? []).some(
-    (m) => m.kind === "ping" || m.body === PING_BODY
-  );
-  if (tooSoon) throw new Error("Wait a few seconds before pinging again");
+  assertDbReady();
+  try {
+    const recentPings = await listDocuments(COLLECTIONS.messages, {
+      equal: { conversation_id: conversationId, sender_id: viewer.id },
+      orderAttr: "created_at",
+      orderAsc: false,
+      limit: 10,
+    }) as unknown as (Message)[];
+    const tooSoon = recentPings.some(
+      (m) => m.created_at >= cutoff && (m.kind === "ping" || m.body === PING_BODY)
+    );
+    if (tooSoon) throw new Error("Wait a few seconds before pinging again");
 
-  const { error } = await supabase.from("messages").insert({
-    conversation_id: conversationId,
-    sender_id: viewer.id,
-    body: PING_BODY,
-    kind: "ping",
-  });
-  if (error) {
-    if (error.message.includes("kind")) {
-      const retry = await supabase.from("messages").insert({
-        conversation_id: conversationId,
-        sender_id: viewer.id,
-        body: PING_BODY,
-      });
-      if (retry.error) throw new Error(retry.error.message);
-    } else if (isMissingChatTables(error)) {
+    await createDocument(COLLECTIONS.messages, {
+      conversation_id: conversationId,
+      sender_id: viewer.id,
+      body: PING_BODY,
+      kind: "ping",
+      created_at: ts,
+      read_at: null,
+    });
+  } catch (e) {
+    if (e instanceof Error && e.message === "Wait a few seconds before pinging again") throw e;
+    if (isMissingChatTables(toErrorInfo(e))) {
       throw new Error(
-        "Chat tables missing — run supabase/migrations/006_chat.sql in Supabase"
+        "Chat tables missing — run supabase/migrations/006_chat.sql, or create the Appwrite conversations/messages collections"
       );
-    } else {
-      throw new Error(error.message);
     }
+    throw e;
   }
 
-  await supabase
-    .from("conversations")
-    .update({
-      last_message_at: ts,
-      updated_at: ts,
-      typing_user_id: null,
-      typing_until: null,
-    })
-    .eq("id", conversationId);
+  await updateDocument(COLLECTIONS.conversations, conversationId, {
+    last_message_at: ts,
+    updated_at: ts,
+    typing_user_id: null,
+    typing_until: null,
+  });
 
   revalidateChatPaths();
   await notifyRecipient({
@@ -437,23 +416,24 @@ export async function setTypingPresence(conversationId: string, isTyping: boolea
     return { ok: true as const };
   }
 
-  const supabase = requireDb();
-  if (isTyping) {
-    const { error } = await supabase
-      .from("conversations")
-      .update({
+  if (!isDataConfigured()) return { ok: false as const };
+  try {
+    if (isTyping) {
+      await updateDocument(COLLECTIONS.conversations, conversationId, {
         typing_user_id: viewer.id,
         typing_until: typingUntilIso(),
-      })
-      .eq("id", conversationId);
-    if (error && !error.message.includes("typing_")) {
-      if (isMissingChatTables(error)) return { ok: false as const };
-      throw new Error(error.message);
+      });
+    } else {
+      await clearTypingForViewer(conversationId, viewer.id);
     }
-  } else {
-    await clearTypingForViewer(conversationId, viewer.id);
+    return { ok: true as const };
+  } catch (e) {
+    const info = toErrorInfo(e);
+    if (info.message.includes("typing_") || isMissingChatTables(info)) {
+      return { ok: false as const };
+    }
+    throw e;
   }
-  return { ok: true as const };
 }
 
 export async function fetchTypingPresence(conversationId: string) {
@@ -486,13 +466,20 @@ export async function markConversationRead(conversationId: string) {
     return;
   }
 
-  const { error } = await requireDb()
-    .from("messages")
-    .update({ read_at: ts })
-    .eq("conversation_id", conversationId)
-    .neq("sender_id", viewer.id)
-    .is("read_at", null);
-  if (error && !isMissingChatTables(error)) throw new Error(error.message);
+  if (!isDataConfigured()) return;
+  try {
+    const unread = await listDocuments(COLLECTIONS.messages, {
+      equal: { conversation_id: conversationId },
+      notEqual: { sender_id: viewer.id },
+      isNull: ["read_at"],
+      limit: 500,
+    }) as unknown as (Message)[];
+    for (const message of unread) {
+      await updateDocument(COLLECTIONS.messages, message.id, { read_at: ts });
+    }
+  } catch (e) {
+    if (!isMissingChatTables(toErrorInfo(e))) throw e;
+  }
   revalidateChatPaths();
 }
 
