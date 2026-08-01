@@ -236,13 +236,48 @@ function isYesNo(value: string) {
 function isColdCallerFormat(headers: string[]) {
   const normalized = headers.map(normalizeHeader);
   const has = (key: string) => normalized.includes(key);
-  return (
-    has("name") &&
-    (has("maps_url") ||
-      has("google_maps") ||
-      (has("category") && has("rating")) ||
-      (has("phone") && has("address") && has("website")))
+  const hasNameLike = normalized.some(
+    (h) =>
+      h === "name" ||
+      h === "business" ||
+      h === "business_name" ||
+      h === "company" ||
+      h === "company_name"
   );
+  const looksLikeMapsExport =
+    has("maps_url") ||
+    has("google_maps") ||
+    has("maps") ||
+    (has("category") && has("rating")) ||
+    (has("phone") && has("address") && has("website")) ||
+    (has("phone") && has("reviews") && has("rating"));
+
+  // Name/Phone/Maps scrap lists, or Phone+Maps even if Name header is odd
+  return looksLikeMapsExport && (hasNameLike || has("phone"));
+}
+
+/**
+ * Resolve the business/person name column for scrap lists.
+ * Falls back to the first column when headers are Name/Phone/Maps-style.
+ */
+function resolveNameColumn(headers: string[], scrapFormat: boolean): number {
+  const byAlias = resolveColumn(headers, HEADER_ALIASES.full_name);
+  if (byAlias >= 0) return byAlias;
+
+  const normalized = headers.map(normalizeHeader);
+  const direct = normalized.findIndex(
+    (h) =>
+      h === "name" ||
+      h === "business" ||
+      h === "business_name" ||
+      h === "company" ||
+      h === "company_name"
+  );
+  if (direct >= 0) return direct;
+
+  // Cold-caller exports always put the business name first
+  if (scrapFormat && headers.length > 0) return 0;
+  return -1;
 }
 
 function buildScrapNotes(parts: Record<string, string>): string | null {
@@ -292,12 +327,18 @@ export function parseLeadCsv(text: string): LeadImportParseResult {
   const scrapFormat = isColdCallerFormat(headers);
 
   const cols = {
-    first_name: resolveColumn(headers, HEADER_ALIASES.first_name),
-    last_name: resolveColumn(headers, HEADER_ALIASES.last_name),
-    full_name: resolveColumn(headers, HEADER_ALIASES.full_name),
+    first_name: scrapFormat
+      ? -1
+      : resolveColumn(headers, HEADER_ALIASES.first_name),
+    last_name: scrapFormat
+      ? -1
+      : resolveColumn(headers, HEADER_ALIASES.last_name),
+    full_name: resolveNameColumn(headers, scrapFormat),
     email: resolveColumn(headers, HEADER_ALIASES.email),
     phone: resolveColumn(headers, HEADER_ALIASES.phone),
-    company_name: resolveColumn(headers, HEADER_ALIASES.company_name),
+    company_name: scrapFormat
+      ? -1
+      : resolveColumn(headers, HEADER_ALIASES.company_name),
     source: resolveColumn(headers, HEADER_ALIASES.source),
     estimated_value: resolveColumn(headers, HEADER_ALIASES.estimated_value),
     notes: resolveColumn(headers, HEADER_ALIASES.notes),
@@ -312,8 +353,6 @@ export function parseLeadCsv(text: string): LeadImportParseResult {
     website_prompt: resolveColumn(headers, HEADER_ALIASES.website_prompt),
   };
 
-  // In scrap lists, "Name" is the business — don't also treat "first" substring matches oddly.
-  // Prefer company from Name when scrap format is detected.
   if (
     cols.first_name < 0 &&
     cols.full_name < 0 &&
@@ -321,7 +360,7 @@ export function parseLeadCsv(text: string): LeadImportParseResult {
     cols.company_name < 0
   ) {
     throw new Error(
-      "CSV must include a First name, Name, Email, or Company column"
+      `CSV must include a Name, First name, Email, or Company column (found: ${headers.join(", ") || "none"})`
     );
   }
 
