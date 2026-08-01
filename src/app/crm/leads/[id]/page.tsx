@@ -53,6 +53,15 @@ export default async function LeadDetailPage({
               <p className="font-medium">{lead.source || "—"}</p>
             </div>
             <div>
+              <p className="text-slate-500">Assigned to</p>
+              <p className="font-medium">
+                {lead.assignee
+                  ? fullName(lead.assignee.first_name, lead.assignee.last_name) ||
+                    lead.assignee.email
+                  : "Unassigned (owners only)"}
+              </p>
+            </div>
+            <div>
               <p className="text-slate-500">Est. value</p>
               <p className="font-medium">{formatCurrency(lead.estimated_value)}</p>
             </div>

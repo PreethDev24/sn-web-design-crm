@@ -18,18 +18,97 @@ export type LeadImportParseResult = {
   headers: string[];
 };
 
-const HEADER_ALIASES: Record<keyof Omit<LeadImportRow, "status" | "estimated_value"> | "estimated_value" | "full_name" | "status", string[]> = {
-  first_name: ["first_name", "firstname", "first", "first name", "given_name", "given name"],
-  last_name: ["last_name", "lastname", "last", "last name", "surname", "family_name", "family name"],
-  full_name: ["full_name", "fullname", "contact", "contact_name", "contact name", "lead_name", "lead name"],
+const HEADER_ALIASES = {
+  first_name: [
+    "first_name",
+    "firstname",
+    "first",
+    "first name",
+    "given_name",
+    "given name",
+  ],
+  last_name: [
+    "last_name",
+    "lastname",
+    "last",
+    "last name",
+    "surname",
+    "family_name",
+    "family name",
+  ],
+  full_name: [
+    "full_name",
+    "full name",
+    "name",
+    "contact",
+    "contact_name",
+    "contact name",
+    "lead_name",
+    "lead name",
+  ],
   email: ["email", "email_address", "email address", "e-mail", "mail"],
-  phone: ["phone", "phone_number", "phone number", "mobile", "cell", "telephone", "tel"],
-  company_name: ["company_name", "company", "business", "business_name", "business name", "organization", "organisation"],
+  phone: [
+    "phone",
+    "phone_number",
+    "phone number",
+    "mobile",
+    "cell",
+    "telephone",
+    "tel",
+  ],
+  company_name: [
+    "company_name",
+    "company",
+    "business",
+    "business_name",
+    "business name",
+    "organization",
+    "organisation",
+    "business name",
+  ],
   source: ["source", "lead_source", "lead source", "origin", "channel"],
-  estimated_value: ["estimated_value", "est_value", "est. value", "value", "amount", "deal_value", "deal value", "budget"],
+  estimated_value: [
+    "estimated_value",
+    "est_value",
+    "est. value",
+    "value",
+    "amount",
+    "deal_value",
+    "deal value",
+    "budget",
+  ],
   notes: ["notes", "note", "comments", "comment", "description", "details"],
   status: ["status", "stage", "pipeline_status"],
-};
+  // Cold-caller / Google Maps scrap lists (Name, Phone, Address, Category, …)
+  category: ["category", "type", "service", "industry"],
+  address: ["address", "location", "area"],
+  rating: ["rating", "stars", "google_rating"],
+  reviews: ["reviews", "review_count", "review count", "num_reviews"],
+  has_website: ["website", "has_website", "has website"],
+  maps_url: [
+    "maps_url",
+    "maps url",
+    "google_maps",
+    "google maps",
+    "map_url",
+    "map url",
+    "maps link",
+    "google maps url",
+  ],
+  cold_call_script: [
+    "cold_call_script",
+    "cold call script",
+    "script",
+    "call_script",
+    "call script",
+  ],
+  website_prompt: [
+    "website_prompt",
+    "website prompt",
+    "site_prompt",
+    "prompt",
+  ],
+} as const;
 
 const VALID_STATUSES = new Set<LeadStatus>([
   "new",
@@ -41,19 +120,21 @@ const VALID_STATUSES = new Set<LeadStatus>([
 ]);
 
 function normalizeHeader(h: string) {
-  return h.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  return h
+    .trim()
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^\w\s-]+/g, "")
+    .replace(/[\s-]+/g, "_");
 }
 
-function resolveColumn(
-  headers: string[],
-  aliases: string[]
-): number {
+function resolveColumn(headers: string[], aliases: readonly string[]): number {
   const normalized = headers.map(normalizeHeader);
   const aliasSet = new Set(aliases.map(normalizeHeader));
   return normalized.findIndex((h) => aliasSet.has(h));
 }
 
-/** Minimal CSV parser with quoted-field support. */
+/** Minimal CSV parser with quoted-field support (incl. newlines in quotes). */
 export function parseCsv(text: string): string[][] {
   const rows: string[][] = [];
   let row: string[] = [];
@@ -66,7 +147,6 @@ export function parseCsv(text: string): string[][] {
     cell = "";
   };
   const pushRow = () => {
-    // skip fully empty trailing lines
     if (row.length === 1 && row[0] === "" && rows.length > 0) {
       row = [];
       return;
@@ -140,8 +220,66 @@ function cell(row: string[], index: number): string {
   return (row[index] ?? "").trim();
 }
 
+function cleanMultiline(value: string) {
+  return value.replace(/\s*\n\s*/g, " — ").replace(/\s+/g, " ").trim();
+}
+
+function isYesNo(value: string) {
+  const v = value.trim().toLowerCase();
+  return v === "yes" || v === "no" || v === "y" || v === "n" || v === "true" || v === "false";
+}
+
+/**
+ * Google Maps / cold-caller exports use Name + Phone + Maps URL (etc.),
+ * where Name is a business, not a person's name.
+ */
+function isColdCallerFormat(headers: string[]) {
+  const normalized = headers.map(normalizeHeader);
+  const has = (key: string) => normalized.includes(key);
+  return (
+    has("name") &&
+    (has("maps_url") ||
+      has("google_maps") ||
+      (has("category") && has("rating")) ||
+      (has("phone") && has("address") && has("website")))
+  );
+}
+
+function buildScrapNotes(parts: Record<string, string>): string | null {
+  const lines: string[] = [];
+  if (parts.category) lines.push(`Category: ${cleanMultiline(parts.category)}`);
+  if (parts.address) {
+    // In these exports "Address" is often the service line (e.g. "Pressure washing service")
+    lines.push(`Service/area: ${cleanMultiline(parts.address)}`);
+  }
+  if (parts.rating) {
+    const reviews = parts.reviews ? ` (${parts.reviews} reviews)` : "";
+    lines.push(`Rating: ${parts.rating}${reviews}`);
+  } else if (parts.reviews) {
+    lines.push(`Reviews: ${parts.reviews}`);
+  }
+  if (parts.has_website) {
+    lines.push(
+      isYesNo(parts.has_website)
+        ? `Has website: ${parts.has_website}`
+        : `Website: ${parts.has_website}`
+    );
+  }
+  if (parts.maps_url) lines.push(`Maps: ${parts.maps_url}`);
+  if (parts.cold_call_script) {
+    lines.push(`Cold call script:\n${parts.cold_call_script}`);
+  }
+  if (parts.website_prompt) {
+    lines.push(`Website prompt:\n${parts.website_prompt}`);
+  }
+  if (parts.extra_notes) lines.push(parts.extra_notes);
+  const text = lines.join("\n").trim();
+  return text ? text.slice(0, 10000) : null;
+}
+
 /**
  * Parse a lead CSV. Header row required. Flexible column names.
+ * Supports CRM templates and cold-caller scrap lists (Name/Phone/Maps URL/…).
  * At least one of first name, full name, email, or company is required per row.
  */
 export function parseLeadCsv(text: string): LeadImportParseResult {
@@ -151,6 +289,8 @@ export function parseLeadCsv(text: string): LeadImportParseResult {
   }
 
   const headers = table[0].map((h) => h.trim());
+  const scrapFormat = isColdCallerFormat(headers);
+
   const cols = {
     first_name: resolveColumn(headers, HEADER_ALIASES.first_name),
     last_name: resolveColumn(headers, HEADER_ALIASES.last_name),
@@ -162,8 +302,18 @@ export function parseLeadCsv(text: string): LeadImportParseResult {
     estimated_value: resolveColumn(headers, HEADER_ALIASES.estimated_value),
     notes: resolveColumn(headers, HEADER_ALIASES.notes),
     status: resolveColumn(headers, HEADER_ALIASES.status),
+    category: resolveColumn(headers, HEADER_ALIASES.category),
+    address: resolveColumn(headers, HEADER_ALIASES.address),
+    rating: resolveColumn(headers, HEADER_ALIASES.rating),
+    reviews: resolveColumn(headers, HEADER_ALIASES.reviews),
+    has_website: resolveColumn(headers, HEADER_ALIASES.has_website),
+    maps_url: resolveColumn(headers, HEADER_ALIASES.maps_url),
+    cold_call_script: resolveColumn(headers, HEADER_ALIASES.cold_call_script),
+    website_prompt: resolveColumn(headers, HEADER_ALIASES.website_prompt),
   };
 
+  // In scrap lists, "Name" is the business — don't also treat "first" substring matches oddly.
+  // Prefer company from Name when scrap format is detected.
   if (
     cols.first_name < 0 &&
     cols.full_name < 0 &&
@@ -181,26 +331,49 @@ export function parseLeadCsv(text: string): LeadImportParseResult {
   for (let r = 1; r < table.length; r++) {
     const line = r + 1;
     const raw = table[r];
+
+    const nameField = cell(raw, cols.full_name);
     let first = cell(raw, cols.first_name);
     let last = cell(raw, cols.last_name) || null;
-    const full = cell(raw, cols.full_name);
-    if (!first && full) {
-      const split = splitFullName(full);
+    let company_name = cell(raw, cols.company_name) || null;
+
+    if (scrapFormat && nameField) {
+      company_name = company_name || nameField;
+      if (!first) {
+        first = nameField.slice(0, 128);
+        last = null;
+      }
+    } else if (!first && nameField) {
+      const split = splitFullName(nameField);
       first = split.first;
       last = last || split.last;
     }
 
     const email = cell(raw, cols.email) || null;
     const phone = cell(raw, cols.phone) || null;
-    const company_name = cell(raw, cols.company_name) || null;
     const source = cell(raw, cols.source) || null;
-    const notes = cell(raw, cols.notes) || null;
     const estimated_value = parseMoney(cell(raw, cols.estimated_value));
     const statusRaw = cell(raw, cols.status).toLowerCase();
     const status: LeadStatus =
       statusRaw && VALID_STATUSES.has(statusRaw as LeadStatus)
         ? (statusRaw as LeadStatus)
         : "new";
+
+    const scrapNotes = scrapFormat
+      ? buildScrapNotes({
+          category: cell(raw, cols.category),
+          address: cell(raw, cols.address),
+          rating: cell(raw, cols.rating),
+          reviews: cell(raw, cols.reviews),
+          has_website: cell(raw, cols.has_website),
+          maps_url: cell(raw, cols.maps_url),
+          cold_call_script: cell(raw, cols.cold_call_script),
+          website_prompt: cell(raw, cols.website_prompt),
+          extra_notes: cell(raw, cols.notes),
+        })
+      : null;
+
+    const notes = scrapNotes || cell(raw, cols.notes) || null;
 
     if (!first && !email && !company_name) {
       skipped.push({
@@ -225,7 +398,11 @@ export function parseLeadCsv(text: string): LeadImportParseResult {
       email: email ? email.slice(0, 320).toLowerCase() : null,
       phone: phone ? phone.slice(0, 64) : null,
       company_name: company_name ? company_name.slice(0, 256) : null,
-      source: source ? source.slice(0, 128) : null,
+      source: source
+        ? source.slice(0, 128)
+        : scrapFormat
+          ? "Cold outreach"
+          : null,
       estimated_value,
       notes: notes ? notes.slice(0, 10000) : null,
       status,

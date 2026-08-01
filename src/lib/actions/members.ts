@@ -144,6 +144,9 @@ async function purgeUserData(userId: string, email: string) {
   await safe("clear lead owner", () =>
     clearFk(COLLECTIONS.leads, "owner_id", userId)
   );
+  await safe("clear lead assigned_to", () =>
+    clearFk(COLLECTIONS.leads, "assigned_to", userId)
+  );
   await safe("clear deal owner", () =>
     clearFk(COLLECTIONS.deals, "owner_id", userId)
   );
@@ -241,6 +244,7 @@ export async function removePortalMember(userId: string) {
       }
       for (const lead of store.leads) {
         if (lead.owner_id === userId) lead.owner_id = null;
+        if (lead.assigned_to === userId) lead.assigned_to = null;
       }
       for (const deal of store.deals) {
         if (deal.owner_id === userId) deal.owner_id = null;

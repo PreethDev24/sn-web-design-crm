@@ -50,8 +50,27 @@ async function usersById(ids: string[]): Promise<DbUser[]> {
   return listDocuments(COLLECTIONS.users, { equalAny: { id: ids } }) as unknown as (DbUser)[];
 }
 
-function withOwner(lead: Lead, users: DbUser[]): Lead {
-  return { ...lead, owner: users.find((u) => u.id === lead.owner_id) ?? null };
+function withLeadRels(lead: Lead, users: DbUser[]): Lead {
+  return {
+    ...lead,
+    assigned_to: lead.assigned_to ?? null,
+    owner: users.find((u) => u.id === lead.owner_id) ?? null,
+    assignee: lead.assigned_to
+      ? users.find((u) => u.id === lead.assigned_to) ?? null
+      : null,
+  };
+}
+
+/** Sales only see leads assigned to them; owners see everything. */
+export function canAccessLead(viewer: DbUser, lead: Pick<Lead, "assigned_to">) {
+  if (viewer.role === "owner") return true;
+  if (viewer.role === "sales") return lead.assigned_to === viewer.id;
+  return false;
+}
+
+function filterLeadsForViewer(leads: Lead[], viewer: DbUser) {
+  if (viewer.role === "owner") return leads;
+  return leads.filter((l) => canAccessLead(viewer, l));
 }
 
 function withDealRels(deal: Deal, users: DbUser[], leads: Lead[]): Deal {
@@ -94,34 +113,54 @@ function withActivityAuthor(item: Activity, users: DbUser[]): Activity {
   return { ...item, author: users.find((u) => u.id === item.author_id) ?? null };
 }
 
-export async function listLeads(_viewer: DbUser): Promise<Lead[]> {
-  // Owner and sales both access the shared leads pipeline; sales can add leads too.
+export async function listLeads(viewer: DbUser): Promise<Lead[]> {
   if (isDemoMode()) {
     const store = readStore();
-    const leads = store.leads.map((l) => withOwner(l, store.users));
+    const leads = filterLeadsForViewer(
+      store.leads.map((l) => withLeadRels(l, store.users)),
+      viewer
+    );
     return leads.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   }
   if (!isDataConfigured()) return emptyResult();
-  const leads = await listDocuments(COLLECTIONS.leads, {
-    orderAttr: "updated_at",
-    orderAsc: false,
-  }) as unknown as (Lead)[];
-  const owners = await usersById(uniqueIds(leads.map((l) => l.owner_id)));
-  return leads.map((l) => withOwner(l, owners));
+
+  let leads: Lead[];
+  if (viewer.role === "sales") {
+    leads = (await listDocuments(COLLECTIONS.leads, {
+      equal: { assigned_to: viewer.id },
+      orderAttr: "updated_at",
+      orderAsc: false,
+    })) as unknown as Lead[];
+  } else {
+    leads = (await listDocuments(COLLECTIONS.leads, {
+      orderAttr: "updated_at",
+      orderAsc: false,
+    })) as unknown as Lead[];
+  }
+
+  const users = await usersById(
+    uniqueIds([
+      ...leads.map((l) => l.owner_id),
+      ...leads.map((l) => l.assigned_to),
+    ])
+  );
+  return leads.map((l) => withLeadRels(l, users));
 }
 
-export async function getLead(id: string, _viewer: DbUser): Promise<Lead | null> {
+export async function getLead(id: string, viewer: DbUser): Promise<Lead | null> {
   if (isDemoMode()) {
     const store = readStore();
     const lead = store.leads.find((l) => l.id === id);
     if (!lead) return null;
-    return withOwner(lead, store.users);
+    const withRels = withLeadRels(lead, store.users);
+    return canAccessLead(viewer, withRels) ? withRels : null;
   }
   if (!isDataConfigured()) return null;
-  const lead = await getDocument(COLLECTIONS.leads, id) as unknown as (Lead) | null;
+  const lead = (await getDocument(COLLECTIONS.leads, id)) as unknown as Lead | null;
   if (!lead) return null;
-  const owner = lead.owner_id ? await getDocument(COLLECTIONS.users, lead.owner_id) as unknown as (DbUser) | null : null;
-  return { ...lead, owner };
+  if (!canAccessLead(viewer, lead)) return null;
+  const users = await usersById(uniqueIds([lead.owner_id, lead.assigned_to]));
+  return withLeadRels(lead, users);
 }
 
 export async function listDeals(viewer: DbUser): Promise<Deal[]> {

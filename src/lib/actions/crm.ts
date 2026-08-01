@@ -16,7 +16,7 @@ import {
 } from "@/lib/db/repo";
 import { isDemoMode } from "@/lib/demo/mode";
 import { ensureDemoInvite } from "@/lib/demo/auth";
-import { mutateStore, newId, touch } from "@/lib/demo/store";
+import { mutateStore, newId, readStore, touch } from "@/lib/demo/store";
 import { allocateDemoProjectId, allocateProjectId } from "@/lib/projects/allocate-project-id";
 import { isMissingClientInviteTable } from "@/lib/db/queries";
 import { syncClerkRoleByEmail } from "@/lib/auth/clerk-role";
@@ -48,10 +48,41 @@ function authorId(userId: string) {
 
 const MAX_LEAD_IMPORT = 500;
 
-export async function importLeadsCsv(csvText: string, defaultSource?: string) {
+function normalizeAssigneeIds(ids: string[] | undefined | null) {
+  return [...new Set((ids || []).map((id) => String(id || "").trim()).filter(Boolean))];
+}
+
+export async function importLeadsCsv(
+  csvText: string,
+  defaultSource?: string,
+  assigneeIds?: string[]
+) {
   const user = await requireOwner();
   const text = String(csvText || "").trim();
   if (!text) throw new Error("Upload a CSV file with leads");
+
+  const assignees = normalizeAssigneeIds(assigneeIds);
+  if (assignees.length === 0) {
+    throw new Error("Select at least one sales rep to assign this lead list to");
+  }
+
+  // Validate assignees are real sales users
+  let salesUsers: DbUser[] = [];
+  if (isDemoMode()) {
+    const storeUsers = readStore().users;
+    salesUsers = storeUsers.filter(
+      (u) => u.role === "sales" && assignees.includes(u.id)
+    );
+  } else {
+    assertDbReady();
+    const { listTeamUsers } = await import("@/lib/db/queries");
+    const team = await listTeamUsers(user);
+    salesUsers = team.filter((u) => u.role === "sales" && assignees.includes(u.id));
+  }
+  if (salesUsers.length === 0) {
+    throw new Error("No valid sales reps selected");
+  }
+  const assigneePool = salesUsers.map((u) => u.id);
 
   const { parseLeadCsv } = await import("@/lib/leads/csv");
   const parsed = parseLeadCsv(text);
@@ -70,10 +101,15 @@ export async function importLeadsCsv(csvText: string, defaultSource?: string) {
   const now = new Date().toISOString();
   let created = 0;
   const errors: { index: number; message: string }[] = [];
+  const assignedCounts: Record<string, number> = Object.fromEntries(
+    assigneePool.map((id) => [id, 0])
+  );
 
   if (isDemoMode()) {
     mutateStore((store) => {
-      for (const row of parsed.rows) {
+      for (let i = 0; i < parsed.rows.length; i++) {
+        const row = parsed.rows[i];
+        const assignedTo = assigneePool[i % assigneePool.length];
         store.leads.push({
           id: newId("lead"),
           first_name: row.first_name,
@@ -86,10 +122,12 @@ export async function importLeadsCsv(csvText: string, defaultSource?: string) {
           notes: row.notes,
           status: row.status,
           owner_id: user.id,
+          assigned_to: assignedTo,
           converted_client_id: null,
           created_at: touch(),
           updated_at: touch(),
         });
+        assignedCounts[assignedTo] = (assignedCounts[assignedTo] || 0) + 1;
         created += 1;
       }
     });
@@ -97,6 +135,7 @@ export async function importLeadsCsv(csvText: string, defaultSource?: string) {
     assertDbReady();
     for (let i = 0; i < parsed.rows.length; i++) {
       const row = parsed.rows[i];
+      const assignedTo = assigneePool[i % assigneePool.length];
       try {
         await createDocument(COLLECTIONS.leads, {
           first_name: row.first_name,
@@ -109,10 +148,12 @@ export async function importLeadsCsv(csvText: string, defaultSource?: string) {
           notes: row.notes || "",
           status: row.status,
           owner_id: authorId(user.id) || "",
+          assigned_to: assignedTo,
           converted_client_id: "",
           created_at: now,
           updated_at: now,
         });
+        assignedCounts[assignedTo] = (assignedCounts[assignedTo] || 0) + 1;
         created += 1;
       } catch (e) {
         errors.push({
@@ -135,6 +176,8 @@ export async function importLeadsCsv(csvText: string, defaultSource?: string) {
       skipped: parsed.skipped.length,
       failed: errors.length,
       defaultSource: sourceFallback,
+      assignees: assigneePool,
+      assignedCounts,
     },
   });
 
@@ -146,6 +189,8 @@ export async function importLeadsCsv(csvText: string, defaultSource?: string) {
       uploader: user,
       createdCount: created,
       source: sourceFallback,
+      recipientIds: assigneePool,
+      assignedCounts,
     }).catch((error) => {
       console.error("Lead-list sales notification failed:", error);
     });
@@ -155,6 +200,7 @@ export async function importLeadsCsv(csvText: string, defaultSource?: string) {
     created,
     skipped: parsed.skipped,
     failed: errors,
+    assignedCounts,
   };
 }
 
@@ -163,6 +209,28 @@ export async function createLead(formData: FormData) {
   const user = await requireStaff();
   if (user.role !== "owner" && user.role !== "sales") {
     throw new Error("Only owners and sales reps can add leads");
+  }
+
+  const requestedAssignee = String(formData.get("assigned_to") || "").trim();
+  let assignedTo: string | null =
+    user.role === "sales" ? user.id : requestedAssignee || null;
+
+  if (user.role === "owner" && assignedTo) {
+    if (isDemoMode()) {
+      const ok = readStore().users.some(
+        (u) => u.id === assignedTo && u.role === "sales"
+      );
+      if (!ok) throw new Error("Invalid sales assignee");
+    } else {
+      assertDbReady();
+      const assignee = (await getDocument(
+        COLLECTIONS.users,
+        assignedTo
+      )) as unknown as DbUser | null;
+      if (!assignee || assignee.role !== "sales") {
+        throw new Error("Invalid sales assignee");
+      }
+    }
   }
 
   if (isDemoMode()) {
@@ -179,6 +247,7 @@ export async function createLead(formData: FormData) {
         notes: String(formData.get("notes") || "").trim() || null,
         status: "new",
         owner_id: user.id,
+        assigned_to: assignedTo,
         converted_client_id: null,
         created_at: touch(),
         updated_at: touch(),
@@ -202,6 +271,7 @@ export async function createLead(formData: FormData) {
     notes: String(formData.get("notes") || "").trim() || null,
     status: "new",
     owner_id: authorId(user.id),
+    assigned_to: assignedTo || "",
     converted_client_id: null,
     created_at: now,
     updated_at: now,
@@ -211,6 +281,8 @@ export async function createLead(formData: FormData) {
 
 export async function updateLeadStatus(leadId: string, status: LeadStatus) {
   const user = await requireStaff();
+  const { getLead } = await import("@/lib/db/queries");
+  if (!(await getLead(leadId, user))) throw new Error("Lead not found");
 
   if (isDemoMode()) {
     mutateStore((store) => {
@@ -253,8 +325,11 @@ export async function updateLeadStatus(leadId: string, status: LeadStatus) {
 }
 
 export async function updateLead(leadId: string, formData: FormData) {
-  await requireStaff();
-  const patch = {
+  const user = await requireStaff();
+  const { getLead } = await import("@/lib/db/queries");
+  if (!(await getLead(leadId, user))) throw new Error("Lead not found");
+
+  const patch: Record<string, unknown> = {
     first_name: String(formData.get("first_name") || "").trim(),
     last_name: String(formData.get("last_name") || "").trim() || null,
     email: String(formData.get("email") || "").trim() || null,
@@ -264,6 +339,27 @@ export async function updateLead(leadId: string, formData: FormData) {
     estimated_value: Number(formData.get("estimated_value") || 0),
     notes: String(formData.get("notes") || "").trim() || null,
   };
+
+  if (user.role === "owner" && formData.has("assigned_to")) {
+    const assignedTo = String(formData.get("assigned_to") || "").trim() || null;
+    if (assignedTo) {
+      if (isDemoMode()) {
+        const ok = readStore().users.some(
+          (u) => u.id === assignedTo && u.role === "sales"
+        );
+        if (!ok) throw new Error("Invalid sales assignee");
+      } else {
+        const assignee = (await getDocument(
+          COLLECTIONS.users,
+          assignedTo
+        )) as unknown as DbUser | null;
+        if (!assignee || assignee.role !== "sales") {
+          throw new Error("Invalid sales assignee");
+        }
+      }
+    }
+    patch.assigned_to = assignedTo;
+  }
 
   if (isDemoMode()) {
     mutateStore((store) => {
@@ -277,16 +373,29 @@ export async function updateLead(leadId: string, formData: FormData) {
   }
 
   assertDbReady();
-  await updateDocument(COLLECTIONS.leads, leadId, {
-    ...patch,
+  const updatePayload: Record<string, unknown> = {
+    first_name: patch.first_name,
+    last_name: patch.last_name,
+    email: patch.email,
+    phone: patch.phone,
+    company_name: patch.company_name,
+    source: patch.source,
+    estimated_value: patch.estimated_value,
+    notes: patch.notes,
     updated_at: new Date().toISOString(),
-  });
+  };
+  if ("assigned_to" in patch) {
+    updatePayload.assigned_to = patch.assigned_to || "";
+  }
+  await updateDocument(COLLECTIONS.leads, leadId, updatePayload);
   revalidatePath(`/crm/leads/${leadId}`);
   revalidatePath("/crm/leads");
 }
 
 export async function deleteLead(leadId: string) {
-  await requireStaff();
+  const user = await requireStaff();
+  const { getLead } = await import("@/lib/db/queries");
+  if (!(await getLead(leadId, user))) throw new Error("Lead not found");
 
   if (isDemoMode()) {
     mutateStore((store) => {
@@ -309,6 +418,8 @@ export async function deleteLead(leadId: string) {
 
 export async function createDealFromLead(leadId: string, formData: FormData) {
   const user = await requireStaff();
+  const { getLead } = await import("@/lib/db/queries");
+  if (!(await getLead(leadId, user))) throw new Error("Lead not found");
 
   if (isDemoMode()) {
     const dealId = mutateStore((store) => {

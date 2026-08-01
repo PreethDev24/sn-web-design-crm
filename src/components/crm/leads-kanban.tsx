@@ -20,7 +20,13 @@ function stageIndex(status: LeadStatus) {
   return columns.indexOf(status);
 }
 
-export function LeadsKanban({ leads }: { leads: Lead[] }) {
+export function LeadsKanban({
+  leads,
+  showAssignee = false,
+}: {
+  leads: Lead[];
+  showAssignee?: boolean;
+}) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [draggingId, setDraggingId] = useState<string | null>(null);
@@ -149,6 +155,16 @@ export function LeadsKanban({ leads }: { leads: Lead[] }) {
                         <p className="mt-0.5 truncate text-[10px] text-slate-500 sm:text-xs">
                           {lead.company_name || lead.email || "—"}
                         </p>
+                        {showAssignee ? (
+                          <p className="mt-0.5 truncate text-[10px] text-teal-700 sm:text-xs">
+                            {lead.assignee
+                              ? fullName(
+                                  lead.assignee.first_name,
+                                  lead.assignee.last_name
+                                ) || lead.assignee.email
+                              : "Unassigned"}
+                          </p>
+                        ) : null}
                         <p className="mt-1 truncate text-[10px] font-medium text-slate-700 sm:text-xs">
                           {formatCurrency(lead.estimated_value)}
                         </p>

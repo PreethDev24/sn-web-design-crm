@@ -84,10 +84,13 @@ export interface Lead {
   estimated_value: number;
   notes: string | null;
   owner_id: string | null;
+  /** Sales rep this lead is assigned to (null = owners only) */
+  assigned_to: string | null;
   converted_client_id: string | null;
   created_at: string;
   updated_at: string;
   owner?: DbUser | null;
+  assignee?: DbUser | null;
 }
 
 export interface Deal {

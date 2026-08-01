@@ -191,11 +191,13 @@ const COLLECTIONS = {
     await createFloat("leads", "estimated_value");
     await createString("leads", "notes", 10000);
     await createString("leads", "owner_id", 64);
+    await createString("leads", "assigned_to", 64);
     await createString("leads", "converted_client_id", 64);
     await createDatetime("leads", "created_at");
     await createDatetime("leads", "updated_at");
     await createIndex("leads", "idx_status", "key", ["status"], ["ASC"]);
     await createIndex("leads", "idx_owner", "key", ["owner_id"], ["ASC"]);
+    await createIndex("leads", "idx_assigned", "key", ["assigned_to"], ["ASC"]);
   },
   deals: async () => {
     await ensureCollection("deals", "Deals");

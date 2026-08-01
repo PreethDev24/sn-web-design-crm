@@ -1,5 +1,5 @@
 import { requireStaff } from "@/lib/auth/roles";
-import { listLeads } from "@/lib/db/queries";
+import { listLeads, listTeamUsers } from "@/lib/db/queries";
 import { CreateLeadDialog } from "@/components/crm/create-lead-dialog";
 import { ImportLeadsDialog } from "@/components/crm/import-leads-dialog";
 import { LeadsKanban } from "@/components/crm/leads-kanban";
@@ -7,7 +7,11 @@ import { Card, CardContent } from "@/components/ui/card";
 
 export default async function LeadsPage() {
   const user = await requireStaff();
-  const leads = await listLeads(user);
+  const [leads, team] = await Promise.all([
+    listLeads(user),
+    user.role === "owner" ? listTeamUsers(user) : Promise.resolve([]),
+  ]);
+  const salesReps = team.filter((u) => u.role === "sales");
   const isOwner = user.role === "owner";
   const roleLabel = isOwner ? "Owner" : "Sales rep";
 
@@ -17,11 +21,13 @@ export default async function LeadsPage() {
         <div className="min-w-0">
           <h1 className="font-display text-3xl text-slate-900">Leads</h1>
           <p className="mt-1 text-slate-500">
-            Signed in as {roleLabel} — you can add leads to the shared pipeline
+            {isOwner
+              ? `Signed in as ${roleLabel} — import lists and assign them to sales reps`
+              : `Signed in as ${roleLabel} — showing leads assigned to you`}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {isOwner && <ImportLeadsDialog />}
+          {isOwner && <ImportLeadsDialog salesReps={salesReps} />}
           <CreateLeadDialog label="Add new lead" />
         </div>
       </div>
@@ -34,12 +40,12 @@ export default async function LeadsPage() {
             </p>
             <p className="text-sm text-teal-800">
               {isOwner
-                ? "Create one lead or import a CSV list into the shared pipeline."
+                ? "Create one lead or import a CSV and choose which sales reps get the list."
                 : "Capture contact info, source, and estimated value, then drag the card through the pipeline."}
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
-            {isOwner && <ImportLeadsDialog variant="outline" />}
+            {isOwner && <ImportLeadsDialog salesReps={salesReps} variant="outline" />}
             <CreateLeadDialog label="Create lead" variant="default" />
           </div>
         </CardContent>
@@ -52,19 +58,19 @@ export default async function LeadsPage() {
               <p className="text-lg font-medium text-slate-900">No leads yet</p>
               <p className="mt-1 text-sm text-slate-500">
                 {isOwner
-                  ? "Add your first lead or import a CSV list to start the pipeline."
-                  : "Start your pipeline — available for both owners and sales reps."}
+                  ? "Import a CSV list and assign it to your sales reps to start the pipeline."
+                  : "No leads are assigned to you yet — an owner can import a list for you."}
               </p>
             </div>
             <div className="flex flex-wrap justify-center gap-2">
-              {isOwner && <ImportLeadsDialog size="lg" />}
+              {isOwner && <ImportLeadsDialog salesReps={salesReps} size="lg" />}
               <CreateLeadDialog label="Add your first lead" size="lg" />
             </div>
           </CardContent>
         </Card>
       ) : (
         <div className="min-w-0 w-full">
-          <LeadsKanban leads={leads} />
+          <LeadsKanban leads={leads} showAssignee={isOwner} />
         </div>
       )}
     </div>

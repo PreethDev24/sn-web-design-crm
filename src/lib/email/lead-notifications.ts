@@ -33,13 +33,15 @@ function uploaderLabel(user: DbUser) {
 }
 
 /**
- * Email every sales rep when an owner uploads a lead list CSV.
- * Fire-and-forget friendly — never throws to the import caller.
+ * Email assigned sales reps when an owner uploads a lead list CSV.
  */
 export async function notifySalesOfLeadListUpload(params: {
   uploader: DbUser;
   createdCount: number;
   source?: string | null;
+  /** If set, only these sales user ids are emailed */
+  recipientIds?: string[];
+  assignedCounts?: Record<string, number>;
 }) {
   if (params.createdCount <= 0) {
     return { sent: 0, skipped: "no_leads" as const };
@@ -55,7 +57,15 @@ export async function notifySalesOfLeadListUpload(params: {
   let sales: DbUser[] = [];
   try {
     const team = await listTeamUsers(params.uploader);
-    sales = team.filter((u) => u.role === "sales" && u.email?.includes("@"));
+    const allowed = params.recipientIds?.length
+      ? new Set(params.recipientIds)
+      : null;
+    sales = team.filter(
+      (u) =>
+        u.role === "sales" &&
+        u.email?.includes("@") &&
+        (!allowed || allowed.has(u.id))
+    );
   } catch (error) {
     console.error("Failed to load sales users for lead-list email:", error);
     return { sent: 0, skipped: "load_failed" as const };
@@ -67,26 +77,27 @@ export async function notifySalesOfLeadListUpload(params: {
 
   const link = leadsDashboardUrl();
   const who = uploaderLabel(params.uploader);
-  const count = params.createdCount;
   const sourceNote = params.source?.trim()
     ? ` Source: ${params.source.trim()}.`
     : "";
   const html = renderLeadListTemplate(link);
-  const subject = `New lead list ready (${count}) — SN Web Design`;
-  const text = [
-    `Hey team,`,
-    ``,
-    `${who} just added ${count} new lead${count === 1 ? "" : "s"} to your dashboard.${sourceNote}`,
-    ``,
-    `Review the list and start outreach:`,
-    link,
-    ``,
-    `— SN Web Design`,
-  ].join("\n");
 
   let sent = 0;
   for (const rep of sales) {
     if (rep.email === params.uploader.email) continue;
+    const theirCount = params.assignedCounts?.[rep.id] ?? params.createdCount;
+    const subject = `New lead list ready (${theirCount}) — SN Web Design`;
+    const text = [
+      `Hey team,`,
+      ``,
+      `${who} assigned you ${theirCount} new lead${theirCount === 1 ? "" : "s"} on your dashboard.${sourceNote}`,
+      ``,
+      `Review the list and start outreach:`,
+      link,
+      ``,
+      `— SN Web Design`,
+    ].join("\n");
+
     const result = await sendGmail({
       to: rep.email,
       subject,

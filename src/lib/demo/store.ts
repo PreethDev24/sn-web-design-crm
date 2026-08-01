@@ -114,6 +114,7 @@ function seedStore(): DemoStore {
     estimated_value: 4500,
     notes: "Needs a marketing site refresh",
     owner_id: sales.id,
+    assigned_to: sales.id,
     converted_client_id: null,
     created_at: ts,
     updated_at: ts,

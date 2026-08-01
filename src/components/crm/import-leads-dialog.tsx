@@ -27,13 +27,17 @@ import {
   parseLeadCsv,
   type LeadImportParseResult,
 } from "@/lib/leads/csv";
+import { fullName } from "@/lib/utils";
+import type { DbUser } from "@/lib/types";
 
 const SOURCES = ["Referral", "Website", "Google", "Instagram", "Cold outreach", "Other"];
 
 export function ImportLeadsDialog({
+  salesReps,
   variant = "outline",
   size = "default",
 }: {
+  salesReps: DbUser[];
   variant?: ButtonProps["variant"];
   size?: ButtonProps["size"];
 }) {
@@ -44,6 +48,7 @@ export function ImportLeadsDialog({
   const [parseError, setParseError] = useState<string | null>(null);
   const [preview, setPreview] = useState<LeadImportParseResult | null>(null);
   const [defaultSource, setDefaultSource] = useState("");
+  const [selectedAssignees, setSelectedAssignees] = useState<string[]>([]);
   const router = useRouter();
 
   const previewRows = useMemo(() => preview?.rows.slice(0, 5) ?? [], [preview]);
@@ -54,6 +59,13 @@ export function ImportLeadsDialog({
     setParseError(null);
     setPreview(null);
     setDefaultSource("");
+    setSelectedAssignees([]);
+  }
+
+  function toggleAssignee(id: string) {
+    setSelectedAssignees((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
   }
 
   function downloadTemplate() {
@@ -71,7 +83,12 @@ export function ImportLeadsDialog({
       reset();
       return;
     }
-    if (!/\.csv$/i.test(file.name) && file.type && !file.type.includes("csv") && file.type !== "text/plain") {
+    if (
+      !/\.csv$/i.test(file.name) &&
+      file.type &&
+      !file.type.includes("csv") &&
+      file.type !== "text/plain"
+    ) {
       setParseError("Please upload a .csv file");
       setPreview(null);
       setCsvText("");
@@ -85,15 +102,18 @@ export function ImportLeadsDialog({
       const parsed = parseLeadCsv(text);
       setPreview(parsed);
       setParseError(
-        parsed.rows.length === 0
-          ? "No valid leads found in this file"
-          : null
+        parsed.rows.length === 0 ? "No valid leads found in this file" : null
       );
     } catch (e) {
       setPreview(null);
       setParseError(e instanceof Error ? e.message : "Could not read CSV");
     }
   }
+
+  const canImport =
+    Boolean(preview && preview.rows.length > 0) &&
+    selectedAssignees.length > 0 &&
+    !pending;
 
   return (
     <Dialog
@@ -113,7 +133,7 @@ export function ImportLeadsDialog({
         <DialogHeader>
           <DialogTitle>Import lead list</DialogTitle>
           <p className="text-sm text-slate-500">
-            Upload a CSV to add many leads at once. Owners only — up to 500 rows.
+            Upload a CSV and assign it to specific sales reps — up to 500 rows.
           </p>
         </DialogHeader>
 
@@ -121,18 +141,10 @@ export function ImportLeadsDialog({
           <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-600">
             <p className="font-medium text-slate-800">Expected columns</p>
             <p className="mt-1">
-              <code className="rounded bg-white px-1">first_name</code>,{" "}
-              <code className="rounded bg-white px-1">last_name</code>,{" "}
-              <code className="rounded bg-white px-1">email</code>,{" "}
-              <code className="rounded bg-white px-1">phone</code>,{" "}
-              <code className="rounded bg-white px-1">company_name</code>,{" "}
-              <code className="rounded bg-white px-1">source</code>,{" "}
-              <code className="rounded bg-white px-1">estimated_value</code>,{" "}
-              <code className="rounded bg-white px-1">notes</code>
-            </p>
-            <p className="mt-2">
-              Also accepts common aliases like <em>Name</em>, <em>Company</em>, or{" "}
-              <em>Phone Number</em>. Each row needs a name, email, or company.
+              CRM template or cold-caller lists (
+              <code className="rounded bg-white px-1">Name</code>,{" "}
+              <code className="rounded bg-white px-1">Phone</code>,{" "}
+              <code className="rounded bg-white px-1">Maps URL</code>, …).
             </p>
             <button
               type="button"
@@ -149,13 +161,14 @@ export function ImportLeadsDialog({
               id="lead-csv"
               type="file"
               accept=".csv,text/csv"
-              onChange={(e) => {
-                void onFile(e.target.files?.[0] ?? null);
-              }}
+              onChange={(e) => void onFile(e.target.files?.[0] ?? null)}
             />
-            {fileName && (
+            {fileName ? (
               <p className="text-xs text-slate-500">Selected: {fileName}</p>
-            )}
+            ) : null}
+            {parseError ? (
+              <p className="text-sm text-red-600">{parseError}</p>
+            ) : null}
           </div>
 
           <div className="space-y-1.5">
@@ -165,10 +178,10 @@ export function ImportLeadsDialog({
               onValueChange={(v) => setDefaultSource(v === "__none__" ? "" : v)}
             >
               <SelectTrigger>
-                <SelectValue placeholder="Use if a row has no source" />
+                <SelectValue placeholder="Use CSV source or leave blank" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="__none__">No default</SelectItem>
+                <SelectItem value="__none__">Use CSV / Cold outreach</SelectItem>
                 {SOURCES.map((s) => (
                   <SelectItem key={s} value={s}>
                     {s}
@@ -178,27 +191,78 @@ export function ImportLeadsDialog({
             </Select>
           </div>
 
-          {parseError && (
-            <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
-              {parseError}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <Label>Assign to sales reps</Label>
+              {salesReps.length > 0 ? (
+                <button
+                  type="button"
+                  className="text-xs font-medium text-teal-700 hover:underline"
+                  onClick={() =>
+                    setSelectedAssignees(
+                      selectedAssignees.length === salesReps.length
+                        ? []
+                        : salesReps.map((r) => r.id)
+                    )
+                  }
+                >
+                  {selectedAssignees.length === salesReps.length
+                    ? "Clear all"
+                    : "Select all"}
+                </button>
+              ) : null}
+            </div>
+            {salesReps.length === 0 ? (
+              <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                No sales reps on the team yet. Invite a sales rep before importing
+                a list.
+              </p>
+            ) : (
+              <ul className="max-h-40 space-y-1 overflow-y-auto rounded-md border border-slate-200 p-2">
+                {salesReps.map((rep) => {
+                  const checked = selectedAssignees.includes(rep.id);
+                  const label =
+                    fullName(rep.first_name, rep.last_name) || rep.email;
+                  return (
+                    <li key={rep.id}>
+                      <label className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-slate-50">
+                        <input
+                          type="checkbox"
+                          className="size-4 rounded border-slate-300"
+                          checked={checked}
+                          onChange={() => toggleAssignee(rep.id)}
+                        />
+                        <span className="min-w-0 truncate font-medium text-slate-900">
+                          {label}
+                        </span>
+                        <span className="truncate text-xs text-slate-500">
+                          {rep.email}
+                        </span>
+                      </label>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+            <p className="text-xs text-slate-500">
+              {selectedAssignees.length > 1
+                ? "Leads are split evenly across the selected reps. Each rep only sees their assigned leads."
+                : "Only the selected rep(s) will see these leads — other sales reps will not."}
             </p>
-          )}
+          </div>
 
           {preview && preview.rows.length > 0 && (
             <div className="space-y-2">
-              <p className="text-sm text-slate-700">
-                Ready to import <strong>{preview.rows.length}</strong> lead
-                {preview.rows.length === 1 ? "" : "s"}
-                {preview.skipped.length > 0
-                  ? ` · ${preview.skipped.length} row(s) will be skipped`
-                  : ""}
+              <p className="text-sm font-medium text-slate-800">
+                Preview ({preview.rows.length} lead
+                {preview.rows.length === 1 ? "" : "s"})
               </p>
               <div className="overflow-x-auto rounded-md border border-slate-200">
-                <table className="min-w-full text-left text-xs">
+                <table className="w-full text-left text-xs">
                   <thead className="bg-slate-50 text-slate-500">
                     <tr>
                       <th className="px-2 py-1.5 font-medium">Name</th>
-                      <th className="px-2 py-1.5 font-medium">Email</th>
+                      <th className="px-2 py-1.5 font-medium">Phone</th>
                       <th className="px-2 py-1.5 font-medium">Company</th>
                       <th className="px-2 py-1.5 font-medium">Source</th>
                     </tr>
@@ -206,11 +270,13 @@ export function ImportLeadsDialog({
                   <tbody>
                     {previewRows.map((row, i) => (
                       <tr key={i} className="border-t border-slate-100">
-                        <td className="px-2 py-1.5 text-slate-800">
-                          {[row.first_name, row.last_name].filter(Boolean).join(" ")}
+                        <td className="px-2 py-1.5">
+                          {[row.first_name, row.last_name]
+                            .filter(Boolean)
+                            .join(" ")}
                         </td>
                         <td className="px-2 py-1.5 text-slate-600">
-                          {row.email || "—"}
+                          {row.phone || "—"}
                         </td>
                         <td className="px-2 py-1.5 text-slate-600">
                           {row.company_name || "—"}
@@ -248,11 +314,19 @@ export function ImportLeadsDialog({
           <Button
             type="button"
             className="w-full"
-            disabled={pending || !preview || preview.rows.length === 0}
+            disabled={!canImport}
             onClick={() => {
+              if (selectedAssignees.length === 0) {
+                toast.error("Select at least one sales rep");
+                return;
+              }
               startTransition(async () => {
                 try {
-                  const result = await importLeadsCsv(csvText, defaultSource || undefined);
+                  const result = await importLeadsCsv(
+                    csvText,
+                    defaultSource || undefined,
+                    selectedAssignees
+                  );
                   const failNote =
                     result.failed.length > 0
                       ? ` · ${result.failed.length} failed`
@@ -262,7 +336,7 @@ export function ImportLeadsDialog({
                       ? ` · ${result.skipped.length} skipped`
                       : "";
                   toast.success(
-                    `Imported ${result.created} lead${result.created === 1 ? "" : "s"}${skipNote}${failNote}`
+                    `Imported ${result.created} lead${result.created === 1 ? "" : "s"} and assigned to ${selectedAssignees.length} sales rep${selectedAssignees.length === 1 ? "" : "s"}${skipNote}${failNote}`
                   );
                   setOpen(false);
                   reset();
