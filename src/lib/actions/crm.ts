@@ -788,7 +788,12 @@ export async function inviteTeamMember(formData: FormData) {
     throw new Error("Invalid role");
   }
 
-  await sendRoleInvitation(email, role);
+  try {
+    await sendRoleInvitation(email, role);
+  } catch (e) {
+    // Ensure production surfaces a readable message (not a digest-only RSC error)
+    throw new Error(e instanceof Error ? e.message : formatClerkInviteError(e));
+  }
   revalidatePath("/crm/team");
   await recordAuditLog({
     action: "member.invited",
@@ -833,19 +838,33 @@ async function sendRoleInvitation(email: string, role: UserRole) {
     return;
   }
 
-  // Revoke any pending invite for this email so Clerk sends a fresh email
-  // (ignoreExisting alone can leave a pending invite without resending).
+  // Revoke any pending invite for this email so a fresh email can be sent.
+  // Also pass ignoreExisting below — Clerk blocks re-invites when older
+  // accepted/revoked invites exist (error text often says "pending" incorrectly).
   try {
-    const { data: existingInvites } = await client.invitations.getInvitationList({
-      query: normalized,
-    });
+    const clientInvites = await clerkClient();
+    const pages = await Promise.all([
+      clientInvites.invitations.getInvitationList({
+        query: normalized,
+        limit: 100,
+      }),
+      clientInvites.invitations.getInvitationList({
+        status: "pending",
+        limit: 100,
+      }),
+    ]);
+    const seen = new Set<string>();
+    const toRevoke = pages
+      .flatMap((p) => p.data)
+      .filter((inv) => {
+        if (seen.has(inv.id)) return false;
+        seen.add(inv.id);
+        return (
+          inv.emailAddress.toLowerCase() === normalized && inv.status === "pending"
+        );
+      });
     await Promise.all(
-      existingInvites
-        .filter(
-          (inv) =>
-            inv.emailAddress.toLowerCase() === normalized && inv.status === "pending"
-        )
-        .map((inv) => client.invitations.revokeInvitation(inv.id))
+      toRevoke.map((inv) => clientInvites.invitations.revokeInvitation(inv.id))
     );
   } catch (e) {
     console.warn("Could not revoke prior invitations:", e);
@@ -861,6 +880,7 @@ async function sendRoleInvitation(email: string, role: UserRole) {
       emailAddress: normalized,
       publicMetadata: { role },
       notify: true,
+      ignoreExisting: true,
       // Must land on SignUp so Clerk can accept the invitation ticket.
       // Sales → /onboarding/sales is handled by the CRM layout after sign-up.
       redirectUrl: `${appUrl}/sign-up`,
@@ -904,8 +924,8 @@ function formatClerkInviteError(error: unknown): string {
   }
   if (code === "duplicate_record") {
     return (
-      detail ||
-      "This email already has an invitation. Check Clerk → Users → Invitations, or ask them to check their inbox/spam."
+      "Clerk still has an old invitation for this email. Try again — we now force a resend. " +
+      "If it keeps failing, revoke invites for this email in Clerk → Users → Invitations."
     );
   }
   return detail || "Failed to send invitation";
