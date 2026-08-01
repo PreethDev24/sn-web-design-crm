@@ -61,14 +61,18 @@ export async function removePortalMember(userId: string) {
   }
 
   assertDbReady();
-  const target = await getDocument(COLLECTIONS.users, userId) as unknown as (DbUser & { clerk_id?: string }) | null;
+  const target = (await getDocument(COLLECTIONS.users, userId)) as unknown as
+    | (DbUser & { clerk_id?: string })
+    | null;
   if (!target) throw new Error("User not found");
   if (target.role !== "sales" && target.role !== "client") {
     throw new Error("Only sales reps and clients can be removed this way");
   }
 
   const clerkId = String(target.clerk_id || "");
-  const email = String(target.email || "").trim().toLowerCase();
+  const email = String(target.email || "")
+    .trim()
+    .toLowerCase();
 
   if (clerkId && !clerkId.startsWith("demo-") && clerkId !== "local-dev-user") {
     try {
@@ -101,14 +105,42 @@ export async function removePortalMember(userId: string) {
     }
   }
 
-  await updateDocuments(COLLECTIONS.clients, { primary_user_id: userId }, { primary_user_id: null });
-  await deleteDocuments(COLLECTIONS.sales_profiles, { user_id: userId });
-  await deleteDocument(COLLECTIONS.users, userId);
+  // Unlink client companies (Appwrite rejects JSON null — use empty string)
+  try {
+    await updateDocuments(
+      COLLECTIONS.clients,
+      { primary_user_id: userId },
+      { primary_user_id: "", updated_at: new Date().toISOString() }
+    );
+  } catch (e) {
+    console.warn("Could not unlink client primary_user_id:", e);
+  }
+
+  // sales_profiles are stored with document $id === user_id
+  try {
+    await deleteDocument(COLLECTIONS.sales_profiles, userId);
+  } catch {
+    /* may not exist */
+  }
+  try {
+    await deleteDocuments(COLLECTIONS.sales_profiles, { user_id: userId });
+  } catch (e) {
+    console.warn("Could not delete sales_profiles by user_id:", e);
+  }
+
+  try {
+    await deleteDocument(COLLECTIONS.users, userId);
+  } catch (e) {
+    throw new Error(
+      `Failed to delete user record: ${e instanceof Error ? e.message : String(e)}`
+    );
+  }
 
   revalidatePath("/crm/team");
   revalidatePath("/crm/contacts");
   revalidatePath("/crm/clients");
   revalidatePath("/crm/audit");
+  revalidatePath("/crm/messages");
   await recordAuditLog({
     action: "member.removed",
     actor: owner,

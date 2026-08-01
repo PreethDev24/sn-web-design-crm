@@ -52,7 +52,7 @@ export function RemoveMemberButton({
           </p>
           <ul className="list-disc space-y-1 pl-5">
             <li>Deletes their Clerk login account</li>
-            <li>Removes their Supabase user record</li>
+            <li>Removes their database user record</li>
             <li>Revokes any pending invite for this email</li>
             {member.role === "client" && (
               <li>Unlinks them from any client company (company data stays)</li>

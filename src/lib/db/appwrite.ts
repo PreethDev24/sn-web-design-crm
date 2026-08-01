@@ -81,8 +81,9 @@ export function toAppwriteData(data: Record<string, unknown>) {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(data)) {
     if (key === "id" || key.startsWith("$")) continue;
-    if (value === undefined) continue;
-    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    // Appwrite string/optional attributes reject JSON null — omit the key instead.
+    if (value === undefined || value === null) continue;
+    if (typeof value === "object" && !Array.isArray(value)) {
       out[key] = JSON.stringify(value);
     } else {
       out[key] = value;

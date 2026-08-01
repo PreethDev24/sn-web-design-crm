@@ -83,9 +83,9 @@ export async function POST(req: NextRequest) {
     if (existing) {
       await updateDocument(COLLECTIONS.users, existing.id, {
         email,
-        first_name: event.data.first_name,
-        last_name: event.data.last_name,
-        avatar_url: event.data.image_url,
+        first_name: event.data.first_name || "",
+        last_name: event.data.last_name || "",
+        avatar_url: event.data.image_url || "",
         role,
         updated_at: now,
       });
@@ -100,9 +100,9 @@ export async function POST(req: NextRequest) {
         await updateDocument(COLLECTIONS.users, byEmail.id, {
           clerk_id: event.data.id,
           email,
-          first_name: event.data.first_name,
-          last_name: event.data.last_name,
-          avatar_url: event.data.image_url,
+          first_name: event.data.first_name || "",
+          last_name: event.data.last_name || "",
+          avatar_url: event.data.image_url || "",
           role: event.data.public_metadata?.role ?? byEmail.role,
           updated_at: now,
         });
@@ -111,9 +111,9 @@ export async function POST(req: NextRequest) {
         const created = await createDocument(COLLECTIONS.users, {
           clerk_id: event.data.id,
           email,
-          first_name: event.data.first_name,
-          last_name: event.data.last_name,
-          avatar_url: event.data.image_url,
+          first_name: event.data.first_name || "",
+          last_name: event.data.last_name || "",
+          avatar_url: event.data.image_url || "",
           role,
           created_at: now,
           updated_at: now,
@@ -124,9 +124,9 @@ export async function POST(req: NextRequest) {
       const created = await createDocument(COLLECTIONS.users, {
         clerk_id: event.data.id,
         email,
-        first_name: event.data.first_name,
-        last_name: event.data.last_name,
-        avatar_url: event.data.image_url,
+        first_name: event.data.first_name || "",
+        last_name: event.data.last_name || "",
+        avatar_url: event.data.image_url || "",
         role,
         created_at: now,
         updated_at: now,
@@ -134,13 +134,18 @@ export async function POST(req: NextRequest) {
       dbUserId = created.id;
     }
 
-    // Link client user to client company by email
+    // Link client user to client company by email (null or empty primary_user_id)
     if (role === "client" && email && dbUserId) {
       await updateDocuments(
         COLLECTIONS.clients,
         { email },
-        { primary_user_id: dbUserId },
+        { primary_user_id: dbUserId, updated_at: now },
         { isNull: ["primary_user_id"] }
+      );
+      await updateDocuments(
+        COLLECTIONS.clients,
+        { email, primary_user_id: "" },
+        { primary_user_id: dbUserId, updated_at: now }
       );
     }
   }

@@ -78,9 +78,9 @@ export async function getOrCreateDbUser(): Promise<DbUser | null> {
       const updated = await updateDocument(COLLECTIONS.users, existing.id, {
         role: nextRole,
         email,
-        first_name: user.firstName,
-        last_name: user.lastName,
-        avatar_url: user.imageUrl,
+        first_name: user.firstName || "",
+        last_name: user.lastName || "",
+        avatar_url: user.imageUrl || "",
         updated_at: now,
       }) as unknown as (DbUser);
 
@@ -109,9 +109,9 @@ export async function getOrCreateDbUser(): Promise<DbUser | null> {
         clerk_id: user.id,
         role: nextRole,
         email,
-        first_name: user.firstName,
-        last_name: user.lastName,
-        avatar_url: user.imageUrl,
+        first_name: user.firstName || "",
+        last_name: user.lastName || "",
+        avatar_url: user.imageUrl || "",
         updated_at: now,
       }) as unknown as (DbUser);
       return relinked;
@@ -139,10 +139,10 @@ export async function getOrCreateDbUser(): Promise<DbUser | null> {
     const created = await createDocument(COLLECTIONS.users, {
       clerk_id: user.id,
       email,
-      first_name: user.firstName,
-      last_name: user.lastName,
+      first_name: user.firstName || "",
+      last_name: user.lastName || "",
       role,
-      avatar_url: user.imageUrl,
+      avatar_url: user.imageUrl || "",
       created_at: now,
       updated_at: now,
     }) as unknown as (DbUser);
