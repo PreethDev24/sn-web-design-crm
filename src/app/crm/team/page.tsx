@@ -6,6 +6,7 @@ import {
   listSalesProfiles,
   listTeamUsers,
 } from "@/lib/db/queries";
+import { isDbConfigured } from "@/lib/db/backend";
 import { fullName } from "@/lib/utils";
 import { InviteTeamForm } from "@/components/crm/invite-team-form";
 import { RequestClientInviteForm } from "@/components/crm/request-client-invite-form";
@@ -18,6 +19,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 export default async function TeamPage() {
   const user = await requireStaff();
   const isOwner = user.role === "owner";
+  const dbConfigured = isDbConfigured();
   const [users, requests, inviteTableReady, salesProfiles] = await Promise.all([
     listTeamUsers(user),
     listClientInviteRequests(user),
@@ -43,6 +45,17 @@ export default async function TeamPage() {
           <Link href="/crm/contacts">Open contacts</Link>
         </Button>
       </div>
+
+      {!dbConfigured && (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-950">
+          <p className="font-medium">Database not connected</p>
+          <p className="mt-1">
+            Set <code className="rounded bg-red-100 px-1">DATA_BACKEND=appwrite</code> and the{" "}
+            <code className="rounded bg-red-100 px-1">APPWRITE_*</code> env vars on this host
+            (Netlify Site settings → Environment variables), then redeploy.
+          </p>
+        </div>
+      )}
 
       {!inviteTableReady && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
@@ -105,6 +118,13 @@ export default async function TeamPage() {
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
+          {users.length === 0 && (
+            <p className="text-sm text-slate-500">
+              {dbConfigured
+                ? "No people found in the database yet."
+                : "Connect Appwrite env vars to load people from the database."}
+            </p>
+          )}
           {users.map((u) => {
             const profile = isOwner ? profileByUser.get(u.id) : undefined;
             return (

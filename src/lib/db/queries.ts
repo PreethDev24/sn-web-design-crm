@@ -3,6 +3,8 @@ import {
   listDocuments,
   getDocument,
   findOneBy,
+  findByEmailIlike,
+  updateDocument,
   collectionReady,
   parseJsonField,
   COLLECTIONS,
@@ -187,7 +189,30 @@ export async function getClientForUser(userId: string): Promise<Client | null> {
     return readStore().clients.find((c) => c.primary_user_id === userId) ?? null;
   }
   if (!isDataConfigured()) return null;
-  return findOneBy(COLLECTIONS.clients, { primary_user_id: userId }) as unknown as (Client) | null;
+  const byPrimary = (await findOneBy(COLLECTIONS.clients, {
+    primary_user_id: userId,
+  })) as unknown as Client | null;
+  if (byPrimary) return byPrimary;
+
+  // Fallback: match client company email to the portal user (and heal the link)
+  const user = (await getDocument(COLLECTIONS.users, userId)) as unknown as DbUser | null;
+  if (!user?.email) return null;
+  const byEmail = (await findByEmailIlike(COLLECTIONS.clients, user.email)) as unknown as
+    | Client
+    | null;
+  if (!byEmail) return null;
+
+  if (!byEmail.primary_user_id) {
+    try {
+      await updateDocument(COLLECTIONS.clients, byEmail.id, {
+        primary_user_id: userId,
+        updated_at: new Date().toISOString(),
+      });
+    } catch (e) {
+      console.warn("Could not heal client primary_user_id:", e);
+    }
+  }
+  return { ...byEmail, primary_user_id: byEmail.primary_user_id ?? userId };
 }
 
 export async function listProjects(_viewer: DbUser): Promise<Project[]> {
@@ -442,11 +467,21 @@ export async function listTeamUsers(viewer?: DbUser): Promise<DbUser[]> {
   } else if (!isDataConfigured()) {
     return emptyResult();
   } else {
-    users = await listDocuments(COLLECTIONS.users, {
-      equalAny: { role: ["owner", "sales", "client"] satisfies UserRole[] },
-      orderAttr: "created_at",
-      orderAsc: false,
-    }) as unknown as (DbUser)[];
+    // Fetch all users then filter in JS — more reliable than Appwrite multi-value
+    // role queries across plan/index differences.
+    try {
+      users = (await listDocuments(COLLECTIONS.users, {
+        orderAttr: "created_at",
+        orderAsc: false,
+        limit: 500,
+      })) as unknown as DbUser[];
+    } catch (e) {
+      console.error("listTeamUsers failed:", e);
+      users = (await listDocuments(COLLECTIONS.users, { limit: 500 })) as unknown as DbUser[];
+    }
+    users = users.filter((u) =>
+      (["owner", "sales", "client"] as UserRole[]).includes(u.role)
+    );
   }
 
   // Sales reps must not see other sales (or themselves) — only owners and clients
