@@ -18,107 +18,6 @@ export type LeadImportParseResult = {
   headers: string[];
 };
 
-const HEADER_ALIASES = {
-  first_name: [
-    "first_name",
-    "firstname",
-    "first",
-    "first name",
-    "given_name",
-    "given name",
-  ],
-  last_name: [
-    "last_name",
-    "lastname",
-    "last",
-    "last name",
-    "surname",
-    "family_name",
-    "family name",
-  ],
-  full_name: [
-    "full_name",
-    "full name",
-    "name",
-    "contact",
-    "contact_name",
-    "contact name",
-    "lead_name",
-    "lead name",
-  ],
-  email: ["email", "email_address", "email address", "e-mail", "mail"],
-  phone: [
-    "phone",
-    "phone_number",
-    "phone number",
-    "mobile",
-    "cell",
-    "telephone",
-    "tel",
-  ],
-  company_name: [
-    "company_name",
-    "company",
-    "business",
-    "business_name",
-    "business name",
-    "organization",
-    "organisation",
-    "business name",
-  ],
-  source: ["source", "lead_source", "lead source", "origin", "channel"],
-  estimated_value: [
-    "estimated_value",
-    "est_value",
-    "est. value",
-    "value",
-    "amount",
-    "deal_value",
-    "deal value",
-    "budget",
-  ],
-  notes: ["notes", "note", "comments", "comment", "description", "details"],
-  status: ["status", "stage", "pipeline_status"],
-  // Cold-caller / Google Maps scrap lists (Name, Phone, Address, Category, …)
-  category: ["category", "type", "service", "industry"],
-  address: ["address", "location", "area"],
-  rating: ["rating", "stars", "google_rating"],
-  reviews: ["reviews", "review_count", "review count", "num_reviews"],
-  has_website: ["website", "has_website", "has website"],
-  maps_url: [
-    "maps_url",
-    "maps url",
-    "google_maps",
-    "google maps",
-    "map_url",
-    "map url",
-    "maps link",
-    "google maps url",
-  ],
-  cold_call_script: [
-    "cold_call_script",
-    "cold call script",
-    "script",
-    "call_script",
-    "call script",
-  ],
-  website_prompt: [
-    "website_prompt",
-    "website prompt",
-    "site_prompt",
-    "prompt",
-  ],
-} as const;
-
-const VALID_STATUSES = new Set<LeadStatus>([
-  "new",
-  "contacted",
-  "qualified",
-  "proposal",
-  "won",
-  "lost",
-]);
-
 function normalizeHeader(h: string) {
   return h
     .trim()
@@ -126,12 +25,6 @@ function normalizeHeader(h: string) {
     .normalize("NFKD")
     .replace(/[^\w\s-]+/g, "")
     .replace(/[\s-]+/g, "_");
-}
-
-function resolveColumn(headers: string[], aliases: readonly string[]): number {
-  const normalized = headers.map(normalizeHeader);
-  const aliasSet = new Set(aliases.map(normalizeHeader));
-  return normalized.findIndex((h) => aliasSet.has(h));
 }
 
 /** Minimal CSV parser with quoted-field support (incl. newlines in quotes). */
@@ -201,20 +94,6 @@ export function parseCsv(text: string): string[][] {
   return rows;
 }
 
-function splitFullName(full: string): { first: string; last: string | null } {
-  const parts = full.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return { first: "", last: null };
-  if (parts.length === 1) return { first: parts[0], last: null };
-  return { first: parts[0], last: parts.slice(1).join(" ") };
-}
-
-function parseMoney(raw: string): number {
-  const cleaned = raw.replace(/[^0-9.-]/g, "");
-  if (!cleaned) return 0;
-  const n = Number(cleaned);
-  return Number.isFinite(n) && n >= 0 ? n : 0;
-}
-
 function cell(row: string[], index: number): string {
   if (index < 0) return "";
   return (row[index] ?? "").trim();
@@ -224,235 +103,299 @@ function cleanMultiline(value: string) {
   return value.replace(/\s*\n\s*/g, " — ").replace(/\s+/g, " ").trim();
 }
 
-function isYesNo(value: string) {
-  const v = value.trim().toLowerCase();
-  return v === "yes" || v === "no" || v === "y" || v === "n" || v === "true" || v === "false";
+function digitCount(value: string) {
+  return (value.match(/\d/g) || []).length;
 }
 
-/**
- * Google Maps / cold-caller exports use Name + Phone + Maps URL (etc.),
- * where Name is a business, not a person's name.
- */
-function isColdCallerFormat(headers: string[]) {
-  const normalized = headers.map(normalizeHeader);
-  const has = (key: string) => normalized.includes(key);
-  const hasNameLike = normalized.some(
-    (h) =>
-      h === "name" ||
-      h === "business" ||
-      h === "business_name" ||
-      h === "company" ||
-      h === "company_name"
-  );
-  const looksLikeMapsExport =
-    has("maps_url") ||
-    has("google_maps") ||
-    has("maps") ||
-    (has("category") && has("rating")) ||
-    (has("phone") && has("address") && has("website")) ||
-    (has("phone") && has("reviews") && has("rating"));
-
-  // Name/Phone/Maps scrap lists, or Phone+Maps even if Name header is odd
-  return looksLikeMapsExport && (hasNameLike || has("phone"));
+/** True if the value looks like a phone number (not a rating, zip-only, etc.). */
+function looksLikePhone(value: string) {
+  const v = value.trim();
+  if (!v) return false;
+  if (/^https?:\/\//i.test(v)) return false;
+  if (/@/.test(v)) return false;
+  const digits = digitCount(v);
+  // US-style and intl: at least 7 digits, allow formatting chars
+  if (digits < 7 || digits > 15) return false;
+  return /^[\d\s()+.\-extEXT#]+$/.test(v);
 }
 
-/**
- * Resolve the business/person name column for scrap lists.
- * Falls back to the first column when headers are Name/Phone/Maps-style.
- */
-function resolveNameColumn(headers: string[], scrapFormat: boolean): number {
-  const byAlias = resolveColumn(headers, HEADER_ALIASES.full_name);
-  if (byAlias >= 0) return byAlias;
-
-  const normalized = headers.map(normalizeHeader);
-  const direct = normalized.findIndex(
-    (h) =>
-      h === "name" ||
-      h === "business" ||
-      h === "business_name" ||
-      h === "company" ||
-      h === "company_name"
-  );
-  if (direct >= 0) return direct;
-
-  // Cold-caller exports always put the business name first
-  if (scrapFormat && headers.length > 0) return 0;
-  return -1;
+function looksLikeEmail(value: string) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
 }
 
-function buildScrapNotes(parts: Record<string, string>): string | null {
+function parseMoney(raw: string): number {
+  const cleaned = raw.replace(/[^0-9.-]/g, "");
+  if (!cleaned) return 0;
+  const n = Number(cleaned);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
+function scoreBusinessNameHeader(h: string): number {
+  const n = normalizeHeader(h);
+  if (!n) return 0;
+  if (n === "name" || n === "business" || n === "business_name" || n === "company" || n === "company_name") {
+    return 100;
+  }
+  if (n.includes("business") && n.includes("name")) return 90;
+  if (n.includes("company") && n.includes("name")) return 90;
+  if (n === "organization" || n === "organisation" || n === "org") return 80;
+  if (n.includes("business")) return 70;
+  if (n.includes("company")) return 70;
+  // Prefer plain "name" over first_name / last_name
+  if (n === "lead_name" || n === "contact_name" || n === "account_name") return 60;
+  if (n.endsWith("_name") && !n.includes("first") && !n.includes("last") && !n.includes("file")) {
+    return 40;
+  }
+  if (n.includes("name") && !n.includes("first") && !n.includes("last") && !n.includes("user")) {
+    return 30;
+  }
+  return 0;
+}
+
+function scorePhoneHeader(h: string): number {
+  const n = normalizeHeader(h);
+  if (!n) return 0;
+  if (n === "phone" || n === "phone_number" || n === "telephone" || n === "mobile" || n === "cell" || n === "tel") {
+    return 100;
+  }
+  if (n.includes("phone") || n.includes("mobile") || n.includes("telephone") || n.includes("cell")) {
+    return 80;
+  }
+  if (n === "tel" || n.endsWith("_tel")) return 70;
+  return 0;
+}
+
+function scoreEmailHeader(h: string): number {
+  const n = normalizeHeader(h);
+  if (n === "email" || n === "email_address" || n === "e_mail") return 100;
+  if (n.includes("email") || n.includes("e_mail")) return 80;
+  return 0;
+}
+
+function bestColumn(headers: string[], scorer: (h: string) => number): number {
+  let bestIdx = -1;
+  let bestScore = 0;
+  headers.forEach((h, i) => {
+    const score = scorer(h);
+    if (score > bestScore) {
+      bestScore = score;
+      bestIdx = i;
+    }
+  });
+  return bestScore > 0 ? bestIdx : -1;
+}
+
+/** Infer phone column from row values when headers are unclear. */
+function inferPhoneColumn(dataRows: string[][], colCount: number, exclude: number): number {
+  let bestIdx = -1;
+  let bestHits = 0;
+  for (let c = 0; c < colCount; c++) {
+    if (c === exclude) continue;
+    let hits = 0;
+    const sample = dataRows.slice(0, Math.min(25, dataRows.length));
+    for (const row of sample) {
+      if (looksLikePhone(cell(row, c))) hits += 1;
+    }
+    if (hits > bestHits) {
+      bestHits = hits;
+      bestIdx = c;
+    }
+  }
+  // Need a clear majority of sample rows looking like phones
+  const threshold = Math.max(1, Math.ceil(Math.min(25, dataRows.length) * 0.4));
+  return bestHits >= threshold ? bestIdx : -1;
+}
+
+/** Infer business-name column: prefer first text-heavy non-phone column. */
+function inferBusinessColumn(
+  dataRows: string[][],
+  colCount: number,
+  phoneIdx: number
+): number {
+  let bestIdx = -1;
+  let bestHits = 0;
+  for (let c = 0; c < colCount; c++) {
+    if (c === phoneIdx) continue;
+    let hits = 0;
+    const sample = dataRows.slice(0, Math.min(25, dataRows.length));
+    for (const row of sample) {
+      const v = cell(row, c);
+      if (!v) continue;
+      if (looksLikePhone(v) || looksLikeEmail(v) || /^https?:\/\//i.test(v)) continue;
+      if (v.length >= 2) hits += 1;
+    }
+    if (hits > bestHits) {
+      bestHits = hits;
+      bestIdx = c;
+    }
+  }
+  if (bestIdx >= 0) return bestIdx;
+  // Absolute fallback: column 0 unless it's the phone column
+  return phoneIdx === 0 ? (colCount > 1 ? 1 : -1) : 0;
+}
+
+function buildExtraNotes(
+  headers: string[],
+  row: string[],
+  usedCols: Set<number>
+): string | null {
   const lines: string[] = [];
-  if (parts.category) lines.push(`Category: ${cleanMultiline(parts.category)}`);
-  if (parts.address) {
-    // In these exports "Address" is often the service line (e.g. "Pressure washing service")
-    lines.push(`Service/area: ${cleanMultiline(parts.address)}`);
-  }
-  if (parts.rating) {
-    const reviews = parts.reviews ? ` (${parts.reviews} reviews)` : "";
-    lines.push(`Rating: ${parts.rating}${reviews}`);
-  } else if (parts.reviews) {
-    lines.push(`Reviews: ${parts.reviews}`);
-  }
-  if (parts.has_website) {
-    lines.push(
-      isYesNo(parts.has_website)
-        ? `Has website: ${parts.has_website}`
-        : `Website: ${parts.has_website}`
-    );
-  }
-  if (parts.maps_url) lines.push(`Maps: ${parts.maps_url}`);
-  if (parts.cold_call_script) {
-    lines.push(`Cold call script:\n${parts.cold_call_script}`);
-  }
-  if (parts.website_prompt) {
-    lines.push(`Website prompt:\n${parts.website_prompt}`);
-  }
-  if (parts.extra_notes) lines.push(parts.extra_notes);
+  headers.forEach((header, i) => {
+    if (usedCols.has(i)) return;
+    const value = cleanMultiline(cell(row, i));
+    if (!value) return;
+    const label = header.trim() || `Column ${i + 1}`;
+    lines.push(`${label}: ${value}`);
+  });
   const text = lines.join("\n").trim();
   return text ? text.slice(0, 10000) : null;
 }
 
 /**
- * Parse a lead CSV. Header row required. Flexible column names.
- * Supports CRM templates and cold-caller scrap lists (Name/Phone/Maps URL/…).
- * At least one of first name, full name, email, or company is required per row.
+ * Parse a lead CSV in almost any format.
+ * Required per row: business name + phone number.
+ * Extra columns (maps URL, rating, notes, etc.) are stored in notes.
  */
 export function parseLeadCsv(text: string): LeadImportParseResult {
   const table = parseCsv(text);
   if (table.length < 2) {
-    throw new Error("CSV needs a header row and at least one lead row");
+    throw new Error("CSV needs a header row and at least one data row");
   }
 
   const headers = table[0].map((h) => h.trim());
-  const scrapFormat = isColdCallerFormat(headers);
+  const dataRows = table.slice(1);
+  const colCount = Math.max(headers.length, ...dataRows.map((r) => r.length));
 
-  const cols = {
-    first_name: scrapFormat
-      ? -1
-      : resolveColumn(headers, HEADER_ALIASES.first_name),
-    last_name: scrapFormat
-      ? -1
-      : resolveColumn(headers, HEADER_ALIASES.last_name),
-    full_name: resolveNameColumn(headers, scrapFormat),
-    email: resolveColumn(headers, HEADER_ALIASES.email),
-    phone: resolveColumn(headers, HEADER_ALIASES.phone),
-    company_name: scrapFormat
-      ? -1
-      : resolveColumn(headers, HEADER_ALIASES.company_name),
-    source: resolveColumn(headers, HEADER_ALIASES.source),
-    estimated_value: resolveColumn(headers, HEADER_ALIASES.estimated_value),
-    notes: resolveColumn(headers, HEADER_ALIASES.notes),
-    status: resolveColumn(headers, HEADER_ALIASES.status),
-    category: resolveColumn(headers, HEADER_ALIASES.category),
-    address: resolveColumn(headers, HEADER_ALIASES.address),
-    rating: resolveColumn(headers, HEADER_ALIASES.rating),
-    reviews: resolveColumn(headers, HEADER_ALIASES.reviews),
-    has_website: resolveColumn(headers, HEADER_ALIASES.has_website),
-    maps_url: resolveColumn(headers, HEADER_ALIASES.maps_url),
-    cold_call_script: resolveColumn(headers, HEADER_ALIASES.cold_call_script),
-    website_prompt: resolveColumn(headers, HEADER_ALIASES.website_prompt),
-  };
+  let businessIdx = bestColumn(headers, scoreBusinessNameHeader);
+  let phoneIdx = bestColumn(headers, scorePhoneHeader);
+  const emailIdx = bestColumn(headers, scoreEmailHeader);
+  const sourceIdx = bestColumn(headers, (h) => {
+    const n = normalizeHeader(h);
+    if (n === "source" || n === "lead_source" || n === "channel" || n === "origin") return 100;
+    if (n.includes("source")) return 50;
+    return 0;
+  });
+  const valueIdx = bestColumn(headers, (h) => {
+    const n = normalizeHeader(h);
+    if (
+      n.includes("estimated") ||
+      n === "value" ||
+      n === "amount" ||
+      n === "budget" ||
+      n.includes("deal_value")
+    ) {
+      return 80;
+    }
+    return 0;
+  });
+  const firstNameIdx = bestColumn(headers, (h) => {
+    const n = normalizeHeader(h);
+    if (n === "first_name" || n === "firstname" || n === "first") return 100;
+    if (n.includes("first") && n.includes("name")) return 80;
+    return 0;
+  });
+  const lastNameIdx = bestColumn(headers, (h) => {
+    const n = normalizeHeader(h);
+    if (n === "last_name" || n === "lastname" || n === "surname") return 100;
+    if (n.includes("last") && n.includes("name")) return 80;
+    return 0;
+  });
 
-  if (
-    cols.first_name < 0 &&
-    cols.full_name < 0 &&
-    cols.email < 0 &&
-    cols.company_name < 0
-  ) {
+  if (phoneIdx < 0) {
+    phoneIdx = inferPhoneColumn(dataRows, colCount, businessIdx);
+  }
+  if (businessIdx < 0) {
+    businessIdx = inferBusinessColumn(dataRows, colCount, phoneIdx);
+  }
+
+  // CRM-style first/last only (no company/name): treat combined person name as business label
+  if (businessIdx < 0 && firstNameIdx >= 0) {
+    businessIdx = firstNameIdx;
+  }
+
+  if (businessIdx < 0 || phoneIdx < 0) {
     throw new Error(
-      `CSV must include a Name, First name, Email, or Company column (found: ${headers.join(", ") || "none"})`
+      `CSV must have a business name column and a phone column. Found headers: ${
+        headers.filter(Boolean).join(", ") || "(none)"
+      }`
     );
   }
 
   const rows: LeadImportRow[] = [];
   const skipped: { line: number; reason: string }[] = [];
 
-  for (let r = 1; r < table.length; r++) {
-    const line = r + 1;
-    const raw = table[r];
+  for (let r = 0; r < dataRows.length; r++) {
+    const line = r + 2; // 1-based + header
+    const raw = dataRows[r];
 
-    const nameField = cell(raw, cols.full_name);
-    let first = cell(raw, cols.first_name);
-    let last = cell(raw, cols.last_name) || null;
-    let company_name = cell(raw, cols.company_name) || null;
+    let company_name = cleanMultiline(cell(raw, businessIdx));
+    const firstFromCol = cleanMultiline(cell(raw, firstNameIdx));
+    const lastFromCol = cleanMultiline(cell(raw, lastNameIdx)) || null;
 
-    if (scrapFormat && nameField) {
-      company_name = company_name || nameField;
-      if (!first) {
-        first = nameField.slice(0, 128);
-        last = null;
-      }
-    } else if (!first && nameField) {
-      const split = splitFullName(nameField);
-      first = split.first;
-      last = last || split.last;
+    // If business col is first_name, combine with last_name when present
+    if (
+      businessIdx === firstNameIdx &&
+      firstFromCol &&
+      lastFromCol &&
+      !company_name.includes(lastFromCol)
+    ) {
+      company_name = `${firstFromCol} ${lastFromCol}`.trim();
     }
 
-    const email = cell(raw, cols.email) || null;
-    const phone = cell(raw, cols.phone) || null;
-    const source = cell(raw, cols.source) || null;
-    const estimated_value = parseMoney(cell(raw, cols.estimated_value));
-    const statusRaw = cell(raw, cols.status).toLowerCase();
-    const status: LeadStatus =
-      statusRaw && VALID_STATUSES.has(statusRaw as LeadStatus)
-        ? (statusRaw as LeadStatus)
-        : "new";
+    const phoneRaw = cleanMultiline(cell(raw, phoneIdx));
+    const emailRaw = emailIdx >= 0 ? cell(raw, emailIdx).trim() : "";
+    const email =
+      emailRaw && looksLikeEmail(emailRaw) ? emailRaw.toLowerCase() : null;
 
-    const scrapNotes = scrapFormat
-      ? buildScrapNotes({
-          category: cell(raw, cols.category),
-          address: cell(raw, cols.address),
-          rating: cell(raw, cols.rating),
-          reviews: cell(raw, cols.reviews),
-          has_website: cell(raw, cols.has_website),
-          maps_url: cell(raw, cols.maps_url),
-          cold_call_script: cell(raw, cols.cold_call_script),
-          website_prompt: cell(raw, cols.website_prompt),
-          extra_notes: cell(raw, cols.notes),
-        })
-      : null;
-
-    const notes = scrapNotes || cell(raw, cols.notes) || null;
-
-    if (!first && !email && !company_name) {
+    if (!company_name) {
+      skipped.push({ line, reason: "Missing business name" });
+      continue;
+    }
+    if (!phoneRaw || !looksLikePhone(phoneRaw)) {
       skipped.push({
         line,
-        reason: "Missing name, email, and company",
+        reason: phoneRaw ? `Invalid phone: ${phoneRaw}` : "Missing phone number",
       });
       continue;
     }
 
-    if (!first) {
-      first = company_name || email?.split("@")[0] || "Lead";
-    }
+    const used = new Set<number>([businessIdx, phoneIdx]);
+    if (emailIdx >= 0) used.add(emailIdx);
+    if (sourceIdx >= 0) used.add(sourceIdx);
+    if (valueIdx >= 0) used.add(valueIdx);
+    if (firstNameIdx >= 0 && firstNameIdx !== businessIdx) used.add(firstNameIdx);
+    if (lastNameIdx >= 0 && lastNameIdx !== businessIdx) used.add(lastNameIdx);
 
-    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      skipped.push({ line, reason: `Invalid email: ${email}` });
-      continue;
-    }
+    const notes = buildExtraNotes(headers, raw, used);
+    const source =
+      (sourceIdx >= 0 ? cell(raw, sourceIdx).trim() : "") || "Cold outreach";
+    const estimated_value =
+      valueIdx >= 0 ? parseMoney(cell(raw, valueIdx)) : 0;
 
     rows.push({
-      first_name: first.slice(0, 128),
-      last_name: last ? last.slice(0, 128) : null,
-      email: email ? email.slice(0, 320).toLowerCase() : null,
-      phone: phone ? phone.slice(0, 64) : null,
-      company_name: company_name ? company_name.slice(0, 256) : null,
-      source: source
-        ? source.slice(0, 128)
-        : scrapFormat
-          ? "Cold outreach"
-          : null,
+      first_name: company_name.slice(0, 128),
+      last_name: null,
+      email: email ? email.slice(0, 320) : null,
+      phone: phoneRaw.slice(0, 64),
+      company_name: company_name.slice(0, 256),
+      source: source.slice(0, 128),
       estimated_value,
-      notes: notes ? notes.slice(0, 10000) : null,
-      status,
+      notes,
+      status: "new",
     });
+  }
+
+  if (rows.length === 0) {
+    const hint =
+      skipped[0]?.reason ||
+      "Each row needs a business name and a valid phone number";
+    throw new Error(`No valid leads found — ${hint}`);
   }
 
   return { rows, skipped, headers };
 }
 
-export const LEAD_CSV_TEMPLATE = `first_name,last_name,email,phone,company_name,source,estimated_value,notes
-Jordan,Lee,jordan@acme.com,555-0100,Acme Coffee,Referral,4500,Wants a new booking site
-Sam,Patel,sam@brightco.io,555-0101,Bright Co,Website,3200,
-Alex,,alex@example.com,,Solo Studio,Cold outreach,1500,Instagram inquiry
+export const LEAD_CSV_TEMPLATE = `Name,Phone,Address,Category,Rating,Reviews,Website,Maps URL
+Bay Area Pressure Pros,(925) 549-9442,Pressure washing service,,5.0,86,Yes,https://maps.example.com
+Sampas Cleaning Services,(510) 491-7824,Pressure washing service,,4.9,29,Yes,https://maps.example.com
 `;

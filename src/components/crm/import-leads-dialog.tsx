@@ -139,19 +139,19 @@ export function ImportLeadsDialog({
 
         <div className="space-y-4">
           <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-600">
-            <p className="font-medium text-slate-800">Expected columns</p>
+            <p className="font-medium text-slate-800">Any CSV format works</p>
             <p className="mt-1">
-              CRM template or cold-caller lists (
-              <code className="rounded bg-white px-1">Name</code>,{" "}
-              <code className="rounded bg-white px-1">Phone</code>,{" "}
-              <code className="rounded bg-white px-1">Maps URL</code>, …).
+              Minimum required columns:{" "}
+              <code className="rounded bg-white px-1">business name</code> and{" "}
+              <code className="rounded bg-white px-1">phone</code>. Extra columns
+              (Maps URL, rating, notes, etc.) are saved automatically.
             </p>
             <button
               type="button"
               onClick={downloadTemplate}
               className="mt-2 font-medium text-teal-700 underline-offset-2 hover:underline"
             >
-              Download template CSV
+              Download example CSV
             </button>
           </div>
 
