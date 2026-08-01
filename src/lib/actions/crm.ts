@@ -138,6 +138,19 @@ export async function importLeadsCsv(csvText: string, defaultSource?: string) {
     },
   });
 
+  if (created > 0) {
+    const { notifySalesOfLeadListUpload } = await import(
+      "@/lib/email/lead-notifications"
+    );
+    void notifySalesOfLeadListUpload({
+      uploader: user,
+      createdCount: created,
+      source: sourceFallback,
+    }).catch((error) => {
+      console.error("Lead-list sales notification failed:", error);
+    });
+  }
+
   return {
     created,
     skipped: parsed.skipped,
