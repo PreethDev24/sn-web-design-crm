@@ -232,7 +232,7 @@ export async function collectionReady(collection: CollectionName): Promise<boole
     return true;
   } catch (e) {
     const msg = String(e instanceof Error ? e.message : e);
-    if (/not found|404|Could not find|does not exist/i.test(msg)) return false;
+    if (/not found|could not be found|404|Could not find|does not exist/i.test(msg)) return false;
     throw e;
   }
 }

@@ -39,6 +39,21 @@ export function getAppwriteStorage() {
 
 export { ID, Query, Permission, Role, APPWRITE_DATABASE_ID };
 
+/** Appwrite 404s use type `document_not_found` and message "could not be found". */
+export function isAppwriteNotFound(e: unknown): boolean {
+  if (e && typeof e === "object") {
+    const err = e as { code?: number | string; type?: string; message?: string };
+    if (err.type === "document_not_found" || err.type === "storage_file_not_found") {
+      return true;
+    }
+    if (err.code === 404 || err.code === "404") return true;
+    if (err.message && /not found|could not be found|404/i.test(err.message)) {
+      return true;
+    }
+  }
+  return /not found|could not be found|404/i.test(String(e));
+}
+
 export function parseJsonField<T>(value: unknown, fallback: T): T {
   if (value == null) return fallback;
   if (typeof value === "object") return value as T;
@@ -122,8 +137,7 @@ export async function awGet(collectionId: CollectionName, id: string) {
     );
     return fromAppwriteDoc(doc as { $id: string });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    if (/not found|404/i.test(msg)) return null;
+    if (isAppwriteNotFound(e)) return null;
     throw e;
   }
 }

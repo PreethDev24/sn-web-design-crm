@@ -550,7 +550,7 @@ export function isMissingClientInviteTable(error: {
     error.code === "PGRST205" ||
     message.includes("client_invite_requests") ||
     message.includes("schema cache") ||
-    /not found|404|Could not find|does not exist/i.test(message)
+    /not found|could not be found|404|Could not find|does not exist/i.test(message)
   );
 }
 
@@ -568,7 +568,7 @@ export function isMissingSalesProfilesTable(error: {
     error.code === "PGRST205" ||
     message.includes("sales_profiles") ||
     (message.includes("schema cache") && message.includes("sales_profiles")) ||
-    /not found|404|Could not find|does not exist/i.test(message)
+    /not found|could not be found|404|Could not find|does not exist/i.test(message)
   );
 }
 
@@ -682,7 +682,7 @@ export function isMissingChatTables(error: {
     message.includes("messages") ||
     (message.includes("schema cache") &&
       (message.includes("conversations") || message.includes("messages"))) ||
-    /not found|404|Could not find|does not exist/i.test(message)
+    /not found|could not be found|404|Could not find|does not exist/i.test(message)
   );
 }
 
@@ -1004,7 +1004,7 @@ export function isMissingAuditLogsTable(error: {
     error.code === "PGRST205" ||
     message.includes("audit_logs") ||
     (message.includes("schema cache") && message.includes("audit_logs")) ||
-    /not found|404|Could not find|does not exist/i.test(message)
+    /not found|could not be found|404|Could not find|does not exist/i.test(message)
   );
 }
 
