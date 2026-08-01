@@ -161,11 +161,17 @@ export async function awUpdate(
   data: Record<string, unknown>,
   permissions?: string[]
 ) {
+  const payload = toAppwriteData(data);
+  if (Object.keys(payload).length === 0 && !permissions?.length) {
+    // Appwrite rejects updates with neither data nor permissions
+    // (common when clearing fields that toAppwriteData omits as null).
+    return awGet(collectionId, id);
+  }
   const doc = await getAppwriteDatabases().updateDocument(
     APPWRITE_DATABASE_ID,
     collectionId,
     id,
-    toAppwriteData(data),
+    payload,
     permissions
   );
   return fromAppwriteDoc(doc as { $id: string });

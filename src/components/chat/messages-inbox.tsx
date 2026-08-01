@@ -226,7 +226,12 @@ export function MessagesInbox({
         router.refresh();
       } catch (err) {
         setDraft(body);
-        setError(err instanceof Error ? err.message : "Failed to send");
+        const msg = err instanceof Error ? err.message : "Failed to send";
+        setError(
+          /Server Components render|digest/i.test(msg)
+            ? "Couldn’t send message. Try again in a moment."
+            : msg
+        );
       }
     });
   }

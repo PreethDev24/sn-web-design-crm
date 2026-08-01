@@ -109,8 +109,8 @@ async function clearTypingForViewer(conversationId: string, viewerId: string) {
   const conv = await getDocument(COLLECTIONS.conversations, conversationId) as unknown as (Conversation) | null;
   if (conv?.typing_user_id === viewerId) {
     await updateDocument(COLLECTIONS.conversations, conversationId, {
-      typing_user_id: null,
-      typing_until: null,
+      typing_user_id: "",
+      typing_until: "",
     });
   }
 }
@@ -194,8 +194,8 @@ export async function startConversation(partnerId: string) {
         last_message_at: ts,
         created_at: ts,
         updated_at: ts,
-        typing_user_id: null,
-        typing_until: null,
+        typing_user_id: "",
+        typing_until: "",
       },
       undefined,
       CHAT_DOC_PERMS
@@ -293,8 +293,8 @@ export async function sendMessage(conversationId: string, body: string) {
     {
       last_message_at: ts,
       updated_at: ts,
-      typing_user_id: null,
-      typing_until: null,
+      typing_user_id: "",
+      typing_until: "",
     },
     CHAT_DOC_PERMS
   );
@@ -408,8 +408,8 @@ export async function sendPing(conversationId: string) {
     {
       last_message_at: ts,
       updated_at: ts,
-      typing_user_id: null,
-      typing_until: null,
+      typing_user_id: "",
+      typing_until: "",
     },
     CHAT_DOC_PERMS
   );
