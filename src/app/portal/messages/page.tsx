@@ -5,6 +5,7 @@ import {
   listConversations,
   listMessages,
 } from "@/lib/db/queries";
+import { getAppwriteRealtimeConfig } from "@/lib/db/appwrite-public";
 import { MessagesInbox } from "@/components/chat/messages-inbox";
 
 export default async function PortalMessagesPage({
@@ -15,6 +16,7 @@ export default async function PortalMessagesPage({
   const user = await requireClient();
   const { c } = await searchParams;
   const ready = await chatTablesReady();
+  const realtimeConfig = getAppwriteRealtimeConfig();
 
   let conversations: Awaited<ReturnType<typeof listConversations>> = [];
   let partners: Awaited<ReturnType<typeof listChatPartners>> = [];
@@ -67,6 +69,7 @@ export default async function PortalMessagesPage({
         activeConversationId={activeId}
         messages={messages}
         basePath="/portal/messages"
+        realtimeConfig={realtimeConfig}
         subtitle="Message the SN Web Design team — use New chat to choose an owner"
       />
     </div>

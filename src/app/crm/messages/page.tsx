@@ -5,6 +5,7 @@ import {
   listConversations,
   listMessages,
 } from "@/lib/db/queries";
+import { getAppwriteRealtimeConfig } from "@/lib/db/appwrite-public";
 import { MessagesInbox } from "@/components/chat/messages-inbox";
 
 export default async function CrmMessagesPage({
@@ -15,6 +16,7 @@ export default async function CrmMessagesPage({
   const user = await requireStaff();
   const { c } = await searchParams;
   const ready = await chatTablesReady();
+  const realtimeConfig = getAppwriteRealtimeConfig();
 
   let conversations: Awaited<ReturnType<typeof listConversations>> = [];
   let partners: Awaited<ReturnType<typeof listChatPartners>> = [];
@@ -67,6 +69,7 @@ export default async function CrmMessagesPage({
         activeConversationId={activeId}
         messages={messages}
         basePath="/crm/messages"
+        realtimeConfig={realtimeConfig}
         subtitle={
           user.role === "owner"
             ? "Message other owners, clients, and sales reps — use New chat to pick who you're writing to"

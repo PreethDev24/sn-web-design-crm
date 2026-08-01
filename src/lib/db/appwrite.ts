@@ -141,14 +141,16 @@ export async function awGet(collectionId: CollectionName, id: string) {
 export async function awCreate(
   collectionId: CollectionName,
   data: Record<string, unknown>,
-  id?: string
+  id?: string,
+  permissions?: string[]
 ) {
   const documentId = id && isValidAppwriteId(id) ? id : ID.unique();
   const doc = await getAppwriteDatabases().createDocument(
     APPWRITE_DATABASE_ID,
     collectionId,
     documentId,
-    toAppwriteData(data)
+    toAppwriteData(data),
+    permissions
   );
   return fromAppwriteDoc(doc as { $id: string });
 }
@@ -156,13 +158,15 @@ export async function awCreate(
 export async function awUpdate(
   collectionId: CollectionName,
   id: string,
-  data: Record<string, unknown>
+  data: Record<string, unknown>,
+  permissions?: string[]
 ) {
   const doc = await getAppwriteDatabases().updateDocument(
     APPWRITE_DATABASE_ID,
     collectionId,
     id,
-    toAppwriteData(data)
+    toAppwriteData(data),
+    permissions
   );
   return fromAppwriteDoc(doc as { $id: string });
 }

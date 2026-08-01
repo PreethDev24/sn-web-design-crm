@@ -13,6 +13,7 @@ import {
   notifyChatMessageIfOffline,
   notifyChatPing,
 } from "@/lib/email/chat-notifications";
+import { Permission, Role } from "@/lib/db/appwrite";
 import {
   isDataConfigured,
   listDocuments,
@@ -30,6 +31,9 @@ import { revalidatePath } from "next/cache";
 const TYPING_TTL_MS = 4000;
 const PING_COOLDOWN_MS = 30_000;
 const PING_BODY = "🔔 Ping";
+
+/** Readable by Realtime clients (collection already allows any; documents need it too). */
+const CHAT_DOC_PERMS = [Permission.read(Role.any()), Permission.update(Role.any())];
 
 function assertDbReady() {
   if (!isDataConfigured()) {
@@ -182,15 +186,20 @@ export async function startConversation(partnerId: string) {
       return existing.id;
     }
 
-    const created = await createDocument(COLLECTIONS.conversations, {
-      participant_one_id: one,
-      participant_two_id: two,
-      last_message_at: ts,
-      created_at: ts,
-      updated_at: ts,
-      typing_user_id: null,
-      typing_until: null,
-    }) as unknown as ({ id: string });
+    const created = await createDocument(
+      COLLECTIONS.conversations,
+      {
+        participant_one_id: one,
+        participant_two_id: two,
+        last_message_at: ts,
+        created_at: ts,
+        updated_at: ts,
+        typing_user_id: null,
+        typing_until: null,
+      },
+      undefined,
+      CHAT_DOC_PERMS
+    ) as unknown as ({ id: string });
     revalidateChatPaths();
     return created.id;
   } catch (e) {
@@ -256,14 +265,19 @@ export async function sendMessage(conversationId: string, body: string) {
 
   assertDbReady();
   try {
-    await createDocument(COLLECTIONS.messages, {
-      conversation_id: conversationId,
-      sender_id: viewer.id,
-      body: text,
-      kind: "text",
-      created_at: ts,
-      read_at: null,
-    });
+    await createDocument(
+      COLLECTIONS.messages,
+      {
+        conversation_id: conversationId,
+        sender_id: viewer.id,
+        body: text,
+        kind: "text",
+        created_at: ts,
+        read_at: null,
+      },
+      undefined,
+      CHAT_DOC_PERMS
+    );
   } catch (e) {
     if (isMissingChatTables(toErrorInfo(e))) {
       throw new Error(
@@ -273,15 +287,21 @@ export async function sendMessage(conversationId: string, body: string) {
     throw e;
   }
 
-  await updateDocument(COLLECTIONS.conversations, conversationId, {
-    last_message_at: ts,
-    updated_at: ts,
-    typing_user_id: null,
-    typing_until: null,
-  });
+  await updateDocument(
+    COLLECTIONS.conversations,
+    conversationId,
+    {
+      last_message_at: ts,
+      updated_at: ts,
+      typing_user_id: null,
+      typing_until: null,
+    },
+    CHAT_DOC_PERMS
+  );
 
   revalidateChatPaths();
-  await notifyRecipient({
+  // Fire-and-forget: specialized missed-message HTML email if recipient is offline
+  void notifyRecipient({
     kind: "message",
     conversationId,
     sender: viewer,
@@ -336,7 +356,7 @@ export async function sendPing(conversationId: string) {
     });
     if (blocked) throw new Error("Wait a few seconds before pinging again");
     revalidateChatPaths();
-    await notifyRecipient({
+    void notifyRecipient({
       kind: "ping",
       conversationId,
       sender: viewer,
@@ -359,14 +379,19 @@ export async function sendPing(conversationId: string) {
     );
     if (tooSoon) throw new Error("Wait a few seconds before pinging again");
 
-    await createDocument(COLLECTIONS.messages, {
-      conversation_id: conversationId,
-      sender_id: viewer.id,
-      body: PING_BODY,
-      kind: "ping",
-      created_at: ts,
-      read_at: null,
-    });
+    await createDocument(
+      COLLECTIONS.messages,
+      {
+        conversation_id: conversationId,
+        sender_id: viewer.id,
+        body: PING_BODY,
+        kind: "ping",
+        created_at: ts,
+        read_at: null,
+      },
+      undefined,
+      CHAT_DOC_PERMS
+    );
   } catch (e) {
     if (e instanceof Error && e.message === "Wait a few seconds before pinging again") throw e;
     if (isMissingChatTables(toErrorInfo(e))) {
@@ -377,15 +402,21 @@ export async function sendPing(conversationId: string) {
     throw e;
   }
 
-  await updateDocument(COLLECTIONS.conversations, conversationId, {
-    last_message_at: ts,
-    updated_at: ts,
-    typing_user_id: null,
-    typing_until: null,
-  });
+  await updateDocument(
+    COLLECTIONS.conversations,
+    conversationId,
+    {
+      last_message_at: ts,
+      updated_at: ts,
+      typing_user_id: null,
+      typing_until: null,
+    },
+    CHAT_DOC_PERMS
+  );
 
   revalidateChatPaths();
-  await notifyRecipient({
+  // Fire-and-forget: specialized ping HTML email (always sent — not gated on online)
+  void notifyRecipient({
     kind: "ping",
     conversationId,
     sender: viewer,
@@ -419,10 +450,15 @@ export async function setTypingPresence(conversationId: string, isTyping: boolea
   if (!isDataConfigured()) return { ok: false as const };
   try {
     if (isTyping) {
-      await updateDocument(COLLECTIONS.conversations, conversationId, {
-        typing_user_id: viewer.id,
-        typing_until: typingUntilIso(),
-      });
+      await updateDocument(
+        COLLECTIONS.conversations,
+        conversationId,
+        {
+          typing_user_id: viewer.id,
+          typing_until: typingUntilIso(),
+        },
+        CHAT_DOC_PERMS
+      );
     } else {
       await clearTypingForViewer(conversationId, viewer.id);
     }

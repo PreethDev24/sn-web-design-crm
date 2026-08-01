@@ -100,19 +100,21 @@ export async function getDocument<T extends Record<string, unknown>>(
 export async function createDocument<T extends Record<string, unknown>>(
   collection: CollectionName,
   data: Record<string, unknown>,
-  id?: string
+  id?: string,
+  permissions?: string[]
 ): Promise<T> {
   assertAppwrite();
-  return (await awCreate(collection, data, id)) as T;
+  return (await awCreate(collection, data, id, permissions)) as T;
 }
 
 export async function updateDocument<T extends Record<string, unknown>>(
   collection: CollectionName,
   id: string,
-  data: Record<string, unknown>
+  data: Record<string, unknown>,
+  permissions?: string[]
 ): Promise<T> {
   assertAppwrite();
-  return (await awUpdate(collection, id, data)) as T;
+  return (await awUpdate(collection, id, data, permissions)) as T;
 }
 
 export async function updateDocuments(

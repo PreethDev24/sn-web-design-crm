@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState, useTransition } from "react";
+import { useCallback, useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Bell, MessageSquare, Send } from "lucide-react";
+import { Bell, MessageSquare, Send, Wifi, WifiOff } from "lucide-react";
+import { toast } from "sonner";
 import {
   fetchTypingPresence,
   markConversationRead,
@@ -11,6 +12,8 @@ import {
   sendPing,
   setTypingPresence,
 } from "@/lib/actions/messages";
+import type { AppwriteRealtimeConfig } from "@/lib/db/appwrite-public";
+import { useChatRealtime } from "@/hooks/use-chat-realtime";
 import type { ChatPartnerOption, Conversation, DbUser, Message } from "@/lib/types";
 import { cn, fullName } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -74,6 +77,7 @@ type MessagesInboxProps = {
   messages: Message[];
   basePath: string;
   subtitle: string;
+  realtimeConfig?: AppwriteRealtimeConfig | null;
 };
 
 export function MessagesInbox({
@@ -84,6 +88,7 @@ export function MessagesInbox({
   messages,
   basePath,
   subtitle,
+  realtimeConfig = null,
 }: MessagesInboxProps) {
   const router = useRouter();
   const [draft, setDraft] = useState("");
@@ -95,11 +100,42 @@ export function MessagesInbox({
   const bottomRef = useRef<HTMLDivElement>(null);
   const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastTypingSent = useRef(0);
+  const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const active = conversations.find((c) => c.id === activeConversationId) ?? null;
   const partnerById = new Map(partners.map((p) => [p.id, p]));
   const activeContext = partnerContext(active?.partner, partnerById);
   const pingReady = Date.now() >= pingCooldownUntil;
+
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimer.current) clearTimeout(refreshTimer.current);
+    refreshTimer.current = setTimeout(() => {
+      router.refresh();
+    }, 150);
+  }, [router]);
+
+  const { connected: live } = useChatRealtime({
+    config: realtimeConfig,
+    viewerId: viewer.id,
+    conversationIds: conversations.map((c) => c.id),
+    activeConversationId,
+    enabled: Boolean(realtimeConfig),
+    onEvent: (event) => {
+      const payload = event.payload;
+      if (
+        activeConversationId &&
+        (payload.participant_one_id === viewer.id ||
+          payload.participant_two_id === viewer.id) &&
+        "typing_user_id" in payload
+      ) {
+        const typing =
+          Boolean(payload.typing_user_id) && payload.typing_user_id !== viewer.id;
+        setPartnerTyping(typing);
+        if (!typing) setTypingName(null);
+      }
+      scheduleRefresh();
+    },
+  });
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -111,9 +147,10 @@ export function MessagesInbox({
   }, [activeConversationId, active?.unread_count]);
 
   useEffect(() => {
+    if (live) return;
     const id = window.setInterval(() => router.refresh(), 8000);
     return () => window.clearInterval(id);
-  }, [router]);
+  }, [router, live]);
 
   useEffect(() => {
     setPartnerTyping(Boolean(active?.partner_is_typing));
@@ -131,21 +168,22 @@ export function MessagesInbox({
         setPartnerTyping(presence.isTyping);
         setTypingName(presence.name);
       } catch {
-        // ignore transient presence errors
+        /* ignore */
       }
     }
 
     void poll();
-    const id = window.setInterval(poll, 2000);
+    const id = window.setInterval(poll, live ? 8000 : 2000);
     return () => {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [activeConversationId]);
+  }, [activeConversationId, live]);
 
   useEffect(() => {
     return () => {
       if (typingTimer.current) clearTimeout(typingTimer.current);
+      if (refreshTimer.current) clearTimeout(refreshTimer.current);
       if (activeConversationId) {
         void setTypingPresence(activeConversationId, false).catch(() => undefined);
       }
@@ -200,6 +238,7 @@ export function MessagesInbox({
     startTransition(async () => {
       try {
         await sendPing(activeConversationId);
+        toast.success("Ping sent — they’ll get an email notification");
         router.refresh();
       } catch (err) {
         setPingCooldownUntil(0);
@@ -214,6 +253,25 @@ export function MessagesInbox({
         <div>
           <h1 className="font-display text-3xl">Messages</h1>
           <p className="mt-1 text-slate-500">{subtitle}</p>
+          <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-slate-400">
+            {live ? (
+              <>
+                <Wifi className="h-3.5 w-3.5 text-teal-600" />
+                <span className="text-teal-700">Live via Appwrite Realtime</span>
+              </>
+            ) : (
+              <>
+                <WifiOff className="h-3.5 w-3.5" />
+                <span>
+                  {realtimeConfig
+                    ? "Connecting to live updates…"
+                    : "Polling updates — Appwrite endpoint/project required for live chat"}
+                </span>
+              </>
+            )}
+            <span className="text-slate-300">·</span>
+            <span>Offline recipients get missed-message / ping emails</span>
+          </p>
         </div>
         <NewChatDialog partners={partners} basePath={basePath} />
       </div>
@@ -327,7 +385,7 @@ export function MessagesInbox({
                   onClick={onPing}
                   title={
                     pingReady
-                      ? "Send a ping to get their attention"
+                      ? "Send a ping — they get an email notification"
                       : "Ping cooldown — try again shortly"
                   }
                 >
@@ -349,7 +407,9 @@ export function MessagesInbox({
                         <div key={message.id} className="flex justify-center py-1">
                           <div className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-center text-xs text-amber-900">
                             <span className="font-medium">
-                              {mine ? "You pinged" : `${partnerLabel(message.sender) || "They"} pinged`}
+                              {mine
+                                ? "You pinged"
+                                : `${partnerLabel(message.sender) || "They"} pinged`}
                             </span>
                             <span className="ml-2 text-amber-700/80">
                               {formatMessageTime(message.created_at)}
