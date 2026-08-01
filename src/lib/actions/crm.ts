@@ -881,8 +881,8 @@ async function sendRoleInvitation(email: string, role: UserRole) {
       publicMetadata: { role },
       notify: true,
       ignoreExisting: true,
-      // Must land on SignUp so Clerk can accept the invitation ticket.
-      // Sales → /onboarding/sales is handled by the CRM layout after sign-up.
+      // Land on SignUp; after accept, SignUp forceRedirectUrl → /post-auth
+      // which sends sales → onboarding and clients → portal.
       redirectUrl: `${appUrl}/sign-up`,
     });
   } catch (e) {

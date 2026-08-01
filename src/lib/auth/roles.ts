@@ -80,7 +80,7 @@ export async function getOrCreateDbUser(): Promise<DbUser | null> {
         email,
         first_name: user.firstName || "",
         last_name: user.lastName || "",
-        avatar_url: user.imageUrl || "",
+        avatar_url: (user.imageUrl || "").slice(0, 2000),
         updated_at: now,
       }) as unknown as (DbUser);
 
@@ -142,7 +142,7 @@ export async function getOrCreateDbUser(): Promise<DbUser | null> {
       first_name: user.firstName || "",
       last_name: user.lastName || "",
       role,
-      avatar_url: user.imageUrl || "",
+      avatar_url: (user.imageUrl || "").slice(0, 2000),
       created_at: now,
       updated_at: now,
     }) as unknown as (DbUser);
@@ -153,7 +153,20 @@ export async function getOrCreateDbUser(): Promise<DbUser | null> {
     if (raced) return raced;
 
     console.error("Failed to create user:", formatDbError(error), error);
-    throw new Error(`Failed to create user: ${formatDbError(error)}`);
+    // Last resort: don't take down the whole app with an uncaught RSC error
+    return {
+      id: `tmp-${user.id.slice(-12)}`,
+      clerk_id: user.id,
+      email,
+      first_name: user.firstName || "",
+      last_name: user.lastName || "",
+      role,
+      phone: null,
+      company_name: null,
+      avatar_url: user.imageUrl || "",
+      created_at: now,
+      updated_at: now,
+    };
   }
 }
 

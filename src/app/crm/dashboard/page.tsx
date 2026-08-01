@@ -7,11 +7,30 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { isDemoMode } from "@/lib/demo/mode";
 import { CreateLeadDialog } from "@/components/crm/create-lead-dialog";
+import type { Lead, Project } from "@/lib/types";
 
 export default async function CrmDashboardPage() {
   const user = await requireStaff();
-  const stats = await getDashboardStats(user);
-  const [leads, projects] = await Promise.all([listLeads(user), listProjects(user)]);
+
+  let stats = {
+    openLeads: 0,
+    pipelineValue: 0,
+    activeProjects: 0,
+    openInvoices: 0,
+    openInvoiceAmount: 0,
+  };
+  let leads: Lead[] = [];
+  let projects: Project[] = [];
+
+  try {
+    [stats, leads, projects] = await Promise.all([
+      getDashboardStats(user),
+      listLeads(user),
+      listProjects(user),
+    ]);
+  } catch (e) {
+    console.error("Dashboard data load failed:", e);
+  }
 
   return (
     <div className="space-y-8">

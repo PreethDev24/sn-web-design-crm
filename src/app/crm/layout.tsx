@@ -1,4 +1,5 @@
 import { redirect } from "next/navigation";
+import { isRedirectError } from "next/dist/client/components/redirect-error";
 import { requireStaff } from "@/lib/auth/roles";
 import { hasCompletedSalesOnboarding } from "@/lib/db/queries";
 import { CrmSidebar } from "@/components/layout/sidebars";
@@ -11,8 +12,15 @@ export default async function CrmLayout({ children }: { children: React.ReactNod
   const user = await requireStaff();
   const demo = isDemoMode();
 
-  if (user.role === "sales" && !(await hasCompletedSalesOnboarding(user))) {
-    redirect("/onboarding/sales");
+  if (user.role === "sales") {
+    try {
+      const done = await hasCompletedSalesOnboarding(user);
+      if (!done) redirect("/onboarding/sales");
+    } catch (e) {
+      if (isRedirectError(e)) throw e;
+      console.error("CRM layout onboarding check failed:", e);
+      redirect("/onboarding/sales");
+    }
   }
 
   return (
