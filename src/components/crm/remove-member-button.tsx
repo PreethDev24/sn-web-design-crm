@@ -51,14 +51,11 @@ export function RemoveMemberButton({
             {member.email}) from the portal.
           </p>
           <ul className="list-disc space-y-1 pl-5">
-            <li>Deletes their Clerk login account</li>
-            <li>Removes their database user record</li>
-            <li>Revokes any pending invite for this email</li>
+            <li>Deletes their Clerk login and pending invites</li>
+            <li>Removes their database user, chat, sales profile, and authored notes</li>
+            <li>Clears assignment references (leads, deals, projects stay)</li>
             {member.role === "client" && (
               <li>Unlinks them from any client company (company data stays)</li>
-            )}
-            {member.role === "sales" && (
-              <li>Clears their sales onboarding profile</li>
             )}
           </ul>
           <p className="font-medium text-red-700">This cannot be undone.</p>
