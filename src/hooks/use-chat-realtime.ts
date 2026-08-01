@@ -10,16 +10,31 @@ type ChatRealtimePayload = {
   participant_one_id?: string;
   participant_two_id?: string;
   typing_user_id?: string | null;
+  typing_until?: string | null;
+  last_message_at?: string;
   kind?: string;
   body?: string;
   sender_id?: string;
+  created_at?: string;
+  read_at?: string | null;
 };
 
 export type ChatRealtimeEvent = {
   channels: string[];
   events: string[];
   payload: ChatRealtimePayload;
+  /** Best-effort collection inferred from Appwrite event names */
+  collection: "messages" | "conversations" | null;
 };
+
+function inferCollection(
+  events: string[],
+): "messages" | "conversations" | null {
+  const joined = events.join(" ");
+  if (joined.includes(".collections.messages.")) return "messages";
+  if (joined.includes(".collections.conversations.")) return "conversations";
+  return null;
+}
 
 /**
  * Subscribe to Appwrite Realtime for chat collections.
@@ -66,6 +81,7 @@ export function useChatRealtime(opts: {
       unsubscribe = client.subscribe<ChatRealtimePayload>(channels, (response) => {
         const payload = response.payload || {};
         const events = response.events || [];
+        const collection = inferCollection(events);
 
         // New/updated message in a thread we know (or are viewing)
         if (payload.conversation_id && convSet.has(payload.conversation_id)) {
@@ -73,6 +89,7 @@ export function useChatRealtime(opts: {
             channels: response.channels,
             events,
             payload,
+            collection: collection ?? "messages",
           });
           return;
         }
@@ -86,6 +103,7 @@ export function useChatRealtime(opts: {
             channels: response.channels,
             events,
             payload,
+            collection: collection ?? "conversations",
           });
         }
       });

@@ -69,6 +69,46 @@ function TypingDots() {
   );
 }
 
+function payloadToMessage(
+  payload: {
+    $id?: string;
+    conversation_id?: string;
+    sender_id?: string;
+    body?: string;
+    kind?: string;
+    created_at?: string;
+    read_at?: string | null;
+  },
+  viewer: DbUser
+): Message | null {
+  const id = typeof payload.$id === "string" ? payload.$id : null;
+  const conversationId =
+    typeof payload.conversation_id === "string" ? payload.conversation_id : null;
+  const senderId = typeof payload.sender_id === "string" ? payload.sender_id : null;
+  const body = typeof payload.body === "string" ? payload.body : null;
+  if (!id || !conversationId || !senderId || body == null) return null;
+  const kind =
+    payload.kind === "ping" || body === "🔔 Ping" ? ("ping" as const) : ("text" as const);
+  return {
+    id,
+    conversation_id: conversationId,
+    sender_id: senderId,
+    body,
+    kind,
+    created_at:
+      typeof payload.created_at === "string" ? payload.created_at : new Date().toISOString(),
+    read_at: typeof payload.read_at === "string" && payload.read_at ? payload.read_at : null,
+    sender: senderId === viewer.id ? viewer : null,
+  };
+}
+
+function sortConversations(list: Conversation[]) {
+  return [...list].sort(
+    (a, b) =>
+      new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime()
+  );
+}
+
 type MessagesInboxProps = {
   viewer: DbUser;
   conversations: Conversation[];
@@ -97,12 +137,27 @@ export function MessagesInbox({
   const [partnerTyping, setPartnerTyping] = useState(false);
   const [typingName, setTypingName] = useState<string | null>(null);
   const [pingCooldownUntil, setPingCooldownUntil] = useState(0);
+  const [localConversations, setLocalConversations] = useState(conversations);
+  const [localMessages, setLocalMessages] = useState(messages);
   const bottomRef = useRef<HTMLDivElement>(null);
   const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastTypingSent = useRef(0);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const knownConversationIds = useRef(new Set(conversations.map((c) => c.id)));
+  const activeIdRef = useRef(activeConversationId);
+  activeIdRef.current = activeConversationId;
 
-  const active = conversations.find((c) => c.id === activeConversationId) ?? null;
+  useEffect(() => {
+    setLocalConversations(conversations);
+    knownConversationIds.current = new Set(conversations.map((c) => c.id));
+  }, [conversations]);
+
+  useEffect(() => {
+    setLocalMessages(messages);
+  }, [messages]);
+
+  const active =
+    localConversations.find((c) => c.id === activeConversationId) ?? null;
   const partnerById = new Map(partners.map((p) => [p.id, p]));
   const activeContext = partnerContext(active?.partner, partnerById);
   const pingReady = Date.now() >= pingCooldownUntil;
@@ -114,35 +169,144 @@ export function MessagesInbox({
     }, 150);
   }, [router]);
 
+  const applyIncomingMessage = useCallback(
+    (msg: Message) => {
+      const viewing = activeIdRef.current === msg.conversation_id;
+      if (viewing) {
+        setLocalMessages((prev) => {
+          if (prev.some((m) => m.id === msg.id)) return prev;
+          const withoutOptimistic = prev.filter(
+            (m) =>
+              !(
+                m.id.startsWith("optimistic-") &&
+                m.sender_id === msg.sender_id &&
+                m.body === msg.body
+              )
+          );
+          return [...withoutOptimistic, msg].sort(
+            (a, b) =>
+              new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+          );
+        });
+      }
+
+      setLocalConversations((prev) => {
+        const exists = prev.some((c) => c.id === msg.conversation_id);
+        if (!exists) return prev;
+        return sortConversations(
+          prev.map((c) => {
+            if (c.id !== msg.conversation_id) return c;
+            const fromOther = msg.sender_id !== viewer.id;
+            return {
+              ...c,
+              last_message_at: msg.created_at,
+              last_message: msg,
+              unread_count:
+                fromOther && !viewing
+                  ? (c.unread_count ?? 0) + 1
+                  : viewing
+                    ? 0
+                    : c.unread_count,
+            };
+          })
+        );
+      });
+    },
+    [viewer.id]
+  );
+
   const { connected: live } = useChatRealtime({
     config: realtimeConfig,
     viewerId: viewer.id,
-    conversationIds: conversations.map((c) => c.id),
+    conversationIds: localConversations.map((c) => c.id),
     activeConversationId,
     enabled: Boolean(realtimeConfig),
     onEvent: (event) => {
       const payload = event.payload;
-      if (
-        activeConversationId &&
-        (payload.participant_one_id === viewer.id ||
-          payload.participant_two_id === viewer.id) &&
-        "typing_user_id" in payload
-      ) {
-        const typing =
-          Boolean(payload.typing_user_id) && payload.typing_user_id !== viewer.id;
-        setPartnerTyping(typing);
-        if (!typing) setTypingName(null);
+      const isMessageEvent =
+        event.collection === "messages" ||
+        (Boolean(payload.conversation_id) &&
+          Boolean(payload.sender_id) &&
+          typeof payload.body === "string" &&
+          !payload.participant_one_id);
+
+      if (isMessageEvent) {
+        const msg = payloadToMessage(payload, viewer);
+        if (msg) applyIncomingMessage(msg);
+        return;
       }
-      scheduleRefresh();
+
+      const isConversationEvent =
+        event.collection === "conversations" ||
+        Boolean(payload.participant_one_id || payload.participant_two_id);
+
+      if (isConversationEvent) {
+        const typing =
+          Boolean(payload.typing_user_id) &&
+          payload.typing_user_id !== viewer.id &&
+          (typeof payload.typing_until !== "string" ||
+            !payload.typing_until ||
+            new Date(payload.typing_until).getTime() > Date.now());
+
+        if (
+          activeIdRef.current &&
+          (payload.$id === activeIdRef.current ||
+            payload.participant_one_id === viewer.id ||
+            payload.participant_two_id === viewer.id)
+        ) {
+          const forActive =
+            !payload.$id || payload.$id === activeIdRef.current;
+          if (forActive) {
+            setPartnerTyping(typing);
+            if (!typing) setTypingName(null);
+          }
+        }
+
+        setLocalConversations((prev) =>
+          prev.map((c) => {
+            if (payload.$id && c.id !== payload.$id) return c;
+            if (
+              !payload.$id &&
+              c.participant_one_id !== payload.participant_one_id &&
+              c.participant_two_id !== payload.participant_two_id
+            ) {
+              return c;
+            }
+            return {
+              ...c,
+              typing_user_id: payload.typing_user_id ?? c.typing_user_id,
+              typing_until: payload.typing_until ?? c.typing_until,
+              partner_is_typing:
+                Boolean(payload.typing_user_id) &&
+                payload.typing_user_id !== viewer.id,
+              last_message_at:
+                typeof payload.last_message_at === "string"
+                  ? payload.last_message_at
+                  : c.last_message_at,
+            };
+          })
+        );
+
+        const id = typeof payload.$id === "string" ? payload.$id : null;
+        if (id && !knownConversationIds.current.has(id)) {
+          knownConversationIds.current.add(id);
+          scheduleRefresh();
+        }
+      }
     },
   });
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages.length, activeConversationId, partnerTyping]);
+  }, [localMessages.length, activeConversationId, partnerTyping]);
 
   useEffect(() => {
     if (!activeConversationId || !active?.unread_count) return;
+    setLocalConversations((prev) =>
+      prev.map((c) =>
+        c.id === activeConversationId ? { ...c, unread_count: 0 } : c
+      )
+    );
     void markConversationRead(activeConversationId).catch(() => undefined);
   }, [activeConversationId, active?.unread_count]);
 
@@ -173,7 +337,8 @@ export function MessagesInbox({
     }
 
     void poll();
-    const id = window.setInterval(poll, live ? 8000 : 2000);
+    // Realtime handles typing when live; poll is only a slow backup
+    const id = window.setInterval(poll, live ? 12_000 : 2000);
     return () => {
       cancelled = true;
       window.clearInterval(id);
@@ -217,14 +382,41 @@ export function MessagesInbox({
     e.preventDefault();
     if (!activeConversationId || !draft.trim()) return;
     const body = draft.trim();
+    const conversationId = activeConversationId;
+    const optimisticId = `optimistic-${Date.now()}`;
+    const createdAt = new Date().toISOString();
+    const optimistic: Message = {
+      id: optimisticId,
+      conversation_id: conversationId,
+      sender_id: viewer.id,
+      body,
+      kind: "text",
+      created_at: createdAt,
+      read_at: null,
+      sender: viewer,
+    };
+
     setDraft("");
     setError(null);
-    void setTypingPresence(activeConversationId, false).catch(() => undefined);
+    void setTypingPresence(conversationId, false).catch(() => undefined);
+    setLocalMessages((prev) => [...prev, optimistic]);
+    setLocalConversations((prev) =>
+      sortConversations(
+        prev.map((c) =>
+          c.id === conversationId
+            ? { ...c, last_message_at: createdAt, last_message: optimistic }
+            : c
+        )
+      )
+    );
+
     startTransition(async () => {
       try {
-        await sendMessage(activeConversationId, body);
-        router.refresh();
+        const saved = await sendMessage(conversationId, body);
+        applyIncomingMessage(saved);
+        setLocalMessages((prev) => prev.filter((m) => m.id !== optimisticId));
       } catch (err) {
+        setLocalMessages((prev) => prev.filter((m) => m.id !== optimisticId));
         setDraft(body);
         const msg = err instanceof Error ? err.message : "Failed to send";
         setError(
@@ -238,13 +430,14 @@ export function MessagesInbox({
 
   function onPing() {
     if (!activeConversationId || !pingReady) return;
+    const conversationId = activeConversationId;
     setError(null);
     setPingCooldownUntil(Date.now() + 30_000);
     startTransition(async () => {
       try {
-        await sendPing(activeConversationId);
+        const saved = await sendPing(conversationId);
+        applyIncomingMessage(saved);
         toast.success("Ping sent — they’ll get an email notification");
-        router.refresh();
       } catch (err) {
         setPingCooldownUntil(0);
         setError(err instanceof Error ? err.message : "Failed to ping");
@@ -296,13 +489,13 @@ export function MessagesInbox({
             <NewChatDialog partners={partners} basePath={basePath} variant="ghost" size="sm" />
           </div>
           <div className="max-h-56 flex-1 overflow-y-auto lg:max-h-none">
-            {conversations.length === 0 ? (
+            {localConversations.length === 0 ? (
               <div className="space-y-3 px-4 py-6 text-center">
                 <p className="text-sm text-slate-500">No conversations yet.</p>
                 <NewChatDialog partners={partners} basePath={basePath} variant="outline" size="sm" />
               </div>
             ) : (
-              conversations.map((conversation) => {
+              localConversations.map((conversation) => {
                 const selected = conversation.id === activeConversationId;
                 const context = partnerContext(conversation.partner, partnerById);
                 const typingHere =
@@ -400,12 +593,12 @@ export function MessagesInbox({
               </div>
 
               <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
-                {messages.length === 0 ? (
+                {localMessages.length === 0 ? (
                   <p className="text-center text-sm text-slate-500">
                     Say hello — this is the start of your conversation.
                   </p>
                 ) : (
-                  messages.map((message) => {
+                  localMessages.map((message) => {
                     const mine = message.sender_id === viewer.id;
                     if (isPingMessage(message)) {
                       return (

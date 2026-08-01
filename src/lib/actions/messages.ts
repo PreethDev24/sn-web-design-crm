@@ -231,7 +231,7 @@ export async function sendMessage(conversationId: string, body: string) {
   await clearTypingForViewer(conversationId, viewer.id);
 
   if (isDemoMode()) {
-    mutateStore((store) => {
+    const message = mutateStore((store) => {
       const message: Message = {
         id: newId("msg"),
         conversation_id: conversationId,
@@ -240,6 +240,7 @@ export async function sendMessage(conversationId: string, body: string) {
         kind: "text",
         created_at: ts,
         read_at: null,
+        sender: viewer,
       };
       store.messages.push(message);
       const conv = store.conversations.find((c) => c.id === conversationId);
@@ -251,21 +252,22 @@ export async function sendMessage(conversationId: string, body: string) {
           conv.typing_until = null;
         }
       }
+      return message;
     });
-    revalidateChatPaths();
-    await notifyRecipient({
+    void notifyRecipient({
       kind: "message",
       conversationId,
       sender: viewer,
       recipientId: partnerId,
       preview: text,
     });
-    return;
+    return message;
   }
 
   assertDbReady();
+  let created: Message;
   try {
-    await createDocument(
+    created = (await createDocument(
       COLLECTIONS.messages,
       {
         conversation_id: conversationId,
@@ -273,11 +275,11 @@ export async function sendMessage(conversationId: string, body: string) {
         body: text,
         kind: "text",
         created_at: ts,
-        read_at: null,
+        read_at: "",
       },
       undefined,
       CHAT_DOC_PERMS
-    );
+    )) as unknown as Message;
   } catch (e) {
     if (isMissingChatTables(toErrorInfo(e))) {
       throw new Error(
@@ -299,7 +301,6 @@ export async function sendMessage(conversationId: string, body: string) {
     CHAT_DOC_PERMS
   );
 
-  revalidateChatPaths();
   // Fire-and-forget: specialized missed-message HTML email if recipient is offline
   void notifyRecipient({
     kind: "message",
@@ -308,6 +309,8 @@ export async function sendMessage(conversationId: string, body: string) {
     recipientId: partnerId,
     preview: text,
   });
+
+  return { ...created, sender: viewer, kind: "text" as const, read_at: null };
 }
 
 export async function sendPing(conversationId: string) {
@@ -325,7 +328,7 @@ export async function sendPing(conversationId: string) {
   const cutoff = new Date(Date.now() - PING_COOLDOWN_MS).toISOString();
 
   if (isDemoMode()) {
-    const blocked = mutateStore((store) => {
+    const message = mutateStore((store) => {
       const recent = store.messages.find(
         (m) =>
           m.conversation_id === conversationId &&
@@ -333,8 +336,8 @@ export async function sendPing(conversationId: string) {
           (m.kind === "ping" || m.body === PING_BODY) &&
           m.created_at >= cutoff
       );
-      if (recent) return true;
-      store.messages.push({
+      if (recent) return null;
+      const message: Message = {
         id: newId("msg"),
         conversation_id: conversationId,
         sender_id: viewer.id,
@@ -342,7 +345,9 @@ export async function sendPing(conversationId: string) {
         kind: "ping",
         created_at: ts,
         read_at: null,
-      });
+        sender: viewer,
+      };
+      store.messages.push(message);
       const conv = store.conversations.find((c) => c.id === conversationId);
       if (conv) {
         conv.last_message_at = ts;
@@ -352,10 +357,9 @@ export async function sendPing(conversationId: string) {
           conv.typing_until = null;
         }
       }
-      return false;
+      return message;
     });
-    if (blocked) throw new Error("Wait a few seconds before pinging again");
-    revalidateChatPaths();
+    if (!message) throw new Error("Wait a few seconds before pinging again");
     void notifyRecipient({
       kind: "ping",
       conversationId,
@@ -363,10 +367,11 @@ export async function sendPing(conversationId: string) {
       recipientId: partnerId,
       preview: PING_BODY,
     });
-    return;
+    return message;
   }
 
   assertDbReady();
+  let created: Message;
   try {
     const recentPings = await listDocuments(COLLECTIONS.messages, {
       equal: { conversation_id: conversationId, sender_id: viewer.id },
@@ -379,7 +384,7 @@ export async function sendPing(conversationId: string) {
     );
     if (tooSoon) throw new Error("Wait a few seconds before pinging again");
 
-    await createDocument(
+    created = (await createDocument(
       COLLECTIONS.messages,
       {
         conversation_id: conversationId,
@@ -387,11 +392,11 @@ export async function sendPing(conversationId: string) {
         body: PING_BODY,
         kind: "ping",
         created_at: ts,
-        read_at: null,
+        read_at: "",
       },
       undefined,
       CHAT_DOC_PERMS
-    );
+    )) as unknown as Message;
   } catch (e) {
     if (e instanceof Error && e.message === "Wait a few seconds before pinging again") throw e;
     if (isMissingChatTables(toErrorInfo(e))) {
@@ -414,7 +419,6 @@ export async function sendPing(conversationId: string) {
     CHAT_DOC_PERMS
   );
 
-  revalidateChatPaths();
   // Fire-and-forget: specialized ping HTML email (always sent — not gated on online)
   void notifyRecipient({
     kind: "ping",
@@ -423,6 +427,8 @@ export async function sendPing(conversationId: string) {
     recipientId: partnerId,
     preview: PING_BODY,
   });
+
+  return { ...created, sender: viewer, kind: "ping" as const, read_at: null };
 }
 
 /** Lightweight presence update — does not revalidate pages. */
@@ -498,7 +504,6 @@ export async function markConversationRead(conversationId: string) {
         }
       }
     });
-    revalidateChatPaths();
     return;
   }
 
@@ -516,7 +521,7 @@ export async function markConversationRead(conversationId: string) {
   } catch (e) {
     if (!isMissingChatTables(toErrorInfo(e))) throw e;
   }
-  revalidateChatPaths();
+  // Skip path revalidation — inbox clears unread locally for snappy UX
 }
 
 export async function ensureChatReady() {
