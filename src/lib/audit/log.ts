@@ -20,6 +20,7 @@ export type AuditAction =
   | "invoice.sent"
   | "invoice.paid"
   | "lead.status_changed"
+  | "lead.imported"
   | "deal.converted"
   | "deliverable.approved"
   | "sales.onboarding.completed";

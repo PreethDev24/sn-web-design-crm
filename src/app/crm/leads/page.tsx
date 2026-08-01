@@ -1,13 +1,15 @@
 import { requireStaff } from "@/lib/auth/roles";
 import { listLeads } from "@/lib/db/queries";
 import { CreateLeadDialog } from "@/components/crm/create-lead-dialog";
+import { ImportLeadsDialog } from "@/components/crm/import-leads-dialog";
 import { LeadsKanban } from "@/components/crm/leads-kanban";
 import { Card, CardContent } from "@/components/ui/card";
 
 export default async function LeadsPage() {
   const user = await requireStaff();
   const leads = await listLeads(user);
-  const roleLabel = user.role === "owner" ? "Owner" : "Sales rep";
+  const isOwner = user.role === "owner";
+  const roleLabel = isOwner ? "Owner" : "Sales rep";
 
   return (
     <div className="min-w-0 space-y-6">
@@ -18,19 +20,28 @@ export default async function LeadsPage() {
             Signed in as {roleLabel} — you can add leads to the shared pipeline
           </p>
         </div>
-        <CreateLeadDialog label="Add new lead" />
+        <div className="flex flex-wrap items-center gap-2">
+          {isOwner && <ImportLeadsDialog />}
+          <CreateLeadDialog label="Add new lead" />
+        </div>
       </div>
 
       <Card className="border-teal-200 bg-teal-50/60">
         <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4">
           <div className="min-w-0">
-            <p className="text-sm font-medium text-teal-950">Add a lead</p>
+            <p className="text-sm font-medium text-teal-950">
+              {isOwner ? "Add leads" : "Add a lead"}
+            </p>
             <p className="text-sm text-teal-800">
-              Owners and sales reps can both create leads. Capture contact info, source, and
-              estimated value, then drag the card through the pipeline.
+              {isOwner
+                ? "Create one lead or import a CSV list into the shared pipeline."
+                : "Capture contact info, source, and estimated value, then drag the card through the pipeline."}
             </p>
           </div>
-          <CreateLeadDialog label="Create lead" variant="default" />
+          <div className="flex flex-wrap gap-2">
+            {isOwner && <ImportLeadsDialog variant="outline" />}
+            <CreateLeadDialog label="Create lead" variant="default" />
+          </div>
         </CardContent>
       </Card>
 
@@ -40,10 +51,15 @@ export default async function LeadsPage() {
             <div>
               <p className="text-lg font-medium text-slate-900">No leads yet</p>
               <p className="mt-1 text-sm text-slate-500">
-                Start your pipeline — available for both owners and sales reps.
+                {isOwner
+                  ? "Add your first lead or import a CSV list to start the pipeline."
+                  : "Start your pipeline — available for both owners and sales reps."}
               </p>
             </div>
-            <CreateLeadDialog label="Add your first lead" size="lg" />
+            <div className="flex flex-wrap justify-center gap-2">
+              {isOwner && <ImportLeadsDialog size="lg" />}
+              <CreateLeadDialog label="Add your first lead" size="lg" />
+            </div>
           </CardContent>
         </Card>
       ) : (

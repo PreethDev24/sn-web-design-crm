@@ -46,6 +46,105 @@ function authorId(userId: string) {
   return userId === "local-dev-user" ? null : userId;
 }
 
+const MAX_LEAD_IMPORT = 500;
+
+export async function importLeadsCsv(csvText: string, defaultSource?: string) {
+  const user = await requireOwner();
+  const text = String(csvText || "").trim();
+  if (!text) throw new Error("Upload a CSV file with leads");
+
+  const { parseLeadCsv } = await import("@/lib/leads/csv");
+  const parsed = parseLeadCsv(text);
+  if (parsed.rows.length === 0) {
+    throw new Error(
+      parsed.skipped.length
+        ? `No valid leads found (${parsed.skipped.length} row(s) skipped)`
+        : "No lead rows found in the CSV"
+    );
+  }
+  if (parsed.rows.length > MAX_LEAD_IMPORT) {
+    throw new Error(`CSV is too large — max ${MAX_LEAD_IMPORT} leads per upload`);
+  }
+
+  const sourceFallback = String(defaultSource || "").trim() || null;
+  const now = new Date().toISOString();
+  let created = 0;
+  const errors: { index: number; message: string }[] = [];
+
+  if (isDemoMode()) {
+    mutateStore((store) => {
+      for (const row of parsed.rows) {
+        store.leads.push({
+          id: newId("lead"),
+          first_name: row.first_name,
+          last_name: row.last_name,
+          email: row.email,
+          phone: row.phone,
+          company_name: row.company_name,
+          source: row.source || sourceFallback,
+          estimated_value: row.estimated_value,
+          notes: row.notes,
+          status: row.status,
+          owner_id: user.id,
+          converted_client_id: null,
+          created_at: touch(),
+          updated_at: touch(),
+        });
+        created += 1;
+      }
+    });
+  } else {
+    assertDbReady();
+    for (let i = 0; i < parsed.rows.length; i++) {
+      const row = parsed.rows[i];
+      try {
+        await createDocument(COLLECTIONS.leads, {
+          first_name: row.first_name,
+          last_name: row.last_name || "",
+          email: row.email || "",
+          phone: row.phone || "",
+          company_name: row.company_name || "",
+          source: row.source || sourceFallback || "",
+          estimated_value: row.estimated_value,
+          notes: row.notes || "",
+          status: row.status,
+          owner_id: authorId(user.id) || "",
+          converted_client_id: "",
+          created_at: now,
+          updated_at: now,
+        });
+        created += 1;
+      } catch (e) {
+        errors.push({
+          index: i + 2,
+          message: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+  }
+
+  revalidatePath("/crm/leads");
+  await recordAuditLog({
+    action: "lead.imported",
+    actor: user,
+    targetType: "lead",
+    targetLabel: `${created} leads`,
+    summary: `Imported ${created} lead(s) from CSV`,
+    metadata: {
+      created,
+      skipped: parsed.skipped.length,
+      failed: errors.length,
+      defaultSource: sourceFallback,
+    },
+  });
+
+  return {
+    created,
+    skipped: parsed.skipped,
+    failed: errors,
+  };
+}
+
 export async function createLead(formData: FormData) {
   // Both owner and sales reps can create leads
   const user = await requireStaff();
