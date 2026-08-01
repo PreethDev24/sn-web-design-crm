@@ -74,15 +74,11 @@ export function fromAppwriteDoc<T extends Record<string, unknown>>(doc: {
   $id: string;
   [key: string]: unknown;
 }): T {
-  const { $id, $createdAt, $updatedAt, $permissions, $databaseId, $collectionId, ...rest } =
-    doc;
-  void $createdAt;
-  void $updatedAt;
-  void $permissions;
-  void $databaseId;
-  void $collectionId;
-  const out: Record<string, unknown> = { id: $id };
-  for (const [key, value] of Object.entries(rest)) {
+  const out: Record<string, unknown> = { id: doc.$id };
+  for (const [key, value] of Object.entries(doc)) {
+    // Drop Appwrite system fields ($id, $sequence, $createdAt, …).
+    // Keys starting with `$` also break Next.js Flight serialization to client components.
+    if (key.startsWith("$")) continue;
     if (JSON_FIELDS.has(key) && typeof value === "string") {
       out[key] = parseJsonField(value, key === "metadata" ? {} : null);
     } else {

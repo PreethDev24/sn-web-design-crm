@@ -15,14 +15,32 @@ export default async function CrmMessagesPage({
   const user = await requireStaff();
   const { c } = await searchParams;
   const ready = await chatTablesReady();
-  const [conversations, partners] = await Promise.all([
-    listConversations(user),
-    listChatPartners(user),
-  ]);
+
+  let conversations: Awaited<ReturnType<typeof listConversations>> = [];
+  let partners: Awaited<ReturnType<typeof listChatPartners>> = [];
+  let loadError: string | null = null;
+
+  try {
+    [conversations, partners] = await Promise.all([
+      listConversations(user),
+      listChatPartners(user),
+    ]);
+  } catch (e) {
+    console.error("crm messages load failed:", e);
+    loadError = e instanceof Error ? e.message : "Failed to load messages";
+  }
 
   const activeId =
     c && conversations.some((conversation) => conversation.id === c) ? c : null;
-  const messages = activeId ? await listMessages(activeId, user) : [];
+  let messages: Awaited<ReturnType<typeof listMessages>> = [];
+  if (activeId) {
+    try {
+      messages = await listMessages(activeId, user);
+    } catch (e) {
+      console.error("crm messages thread load failed:", e);
+      loadError = e instanceof Error ? e.message : "Failed to load conversation";
+    }
+  }
 
   return (
     <div className="space-y-4">
@@ -34,6 +52,12 @@ export default async function CrmMessagesPage({
             <code className="rounded bg-amber-100 px-1">npm run appwrite:setup</code>{" "}
             to create chat collections, then refresh this page.
           </p>
+        </div>
+      )}
+      {loadError && (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-950">
+          <p className="font-medium">Couldn’t load messages</p>
+          <p className="mt-1">{loadError}</p>
         </div>
       )}
       <MessagesInbox

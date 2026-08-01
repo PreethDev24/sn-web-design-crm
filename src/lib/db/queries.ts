@@ -726,7 +726,9 @@ function pickPrimaryProject(projects: Project[]): Project | null {
   const open = projects.filter((p) => !["completed", "terminated"].includes(p.status));
   const pool = open.length ? open : projects;
   return (
-    [...pool].sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0] ?? null
+    [...pool].sort((a, b) =>
+      String(b.updated_at || "").localeCompare(String(a.updated_at || ""))
+    )[0] ?? null
   );
 }
 
@@ -841,7 +843,9 @@ export async function listConversations(viewer: DbUser): Promise<Conversation[]>
     ]);
     const byId = new Map<string, Conversation>();
     for (const row of [...asOne, ...asTwo]) byId.set(row.id, row);
-    rows = [...byId.values()].sort((a, b) => b.last_message_at.localeCompare(a.last_message_at));
+    rows = [...byId.values()].sort((a, b) =>
+      String(b.last_message_at || "").localeCompare(String(a.last_message_at || ""))
+    );
   } catch (e) {
     const error = { message: e instanceof Error ? e.message : String(e) };
     if (isMissingChatTables(error)) return emptyResult();
