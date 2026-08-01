@@ -16,10 +16,13 @@ function createClerkMiddleware() {
     "/",
     "/sign-in(.*)",
     "/sign-up(.*)",
+    // Let the page wait for the Clerk cookie after invite accept —
+    // middleware redirecting to /sign-in here causes a tight loop with
+    // SignIn → /post-auth when the session isn't readable yet.
+    "/post-auth(.*)",
     "/api/webhooks(.*)",
     "/api/demo(.*)",
   ]);
-  const isCrmRoute = createRouteMatcher(["/crm(.*)"]);
   const isPortalRoute = createRouteMatcher(["/portal(.*)"]);
 
   return clerkMiddleware(async (auth, req) => {
